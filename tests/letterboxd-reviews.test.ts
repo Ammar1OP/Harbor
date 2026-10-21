@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import * as React from "react";
 import * as jsxRuntime from "react/jsx-runtime";
+import { JSDOM } from "jsdom";
 import ts from "typescript";
 
 async function openDetails({
@@ -38,8 +39,13 @@ async function openDetails({
       },
     },
     "@/lib/window": { openUrl: (url: string) => openedUrls.push(url) },
-    "@/lib/i18n": { useT: () => (text: string) => text },
+    "@/lib/i18n": { useT: () => (text: string) => text, useUiLanguage: () => "en", LANGUAGES: [] },
     "@/lib/settings": { useSettings: () => ({ settings: {} }) },
+    "./review-translation": {
+      useReviewTranslator: () => ({ display: (text: string) => text }),
+      ReviewTranslateBar: () => null,
+      ReviewTranslateButton: () => null,
+    },
   };
   const source = readFileSync("src/views/detail/letterboxd-reviews.tsx", "utf8");
   const compiled = ts.transpileModule(source, {
@@ -128,3 +134,61 @@ for (const status of [403, 404, 503]) {
     ]);
   });
 }
+
+function loadClient(safeFetch: (url: string) => Promise<Response>) {
+  globalThis.DOMParser ??= new JSDOM().window.DOMParser;
+  const mocks: Record<string, unknown> = {
+    "@/lib/safe-fetch": { safeFetch },
+    "./config": { STREMBOXD_BASE: "https://example.invalid" },
+    "./cache": {},
+  };
+  const source = readFileSync("src/lib/stremboxd/client.ts", "utf8");
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  const exports = {} as typeof import("../src/lib/stremboxd/client");
+  new Function("require", "exports", compiled)((name: string) => {
+    assert.ok(name in mocks, `unexpected import ${name}`);
+    return mocks[name];
+  }, exports);
+  return exports;
+}
+
+const review = (author: string, stars: string, text: string) =>
+  `<article class="production-viewing"><a class="avatar" href="/${author}/"></a><span class="displayname">${author}</span><span class="inline-rating"><svg aria-label="${stars}"></svg></span><div class="js-review-body" lang="en"><p>${text}</p></div></article>`;
+
+test("blocked review pages fall back to the film page and sort its reviews here", async () => {
+  const requests: string[] = [];
+  const client = loadClient(async (url) => {
+    requests.push(url);
+    if (url.endsWith("/imdb/tt0120791/")) {
+      return new Response(
+        `<link rel="canonical" href="https://letterboxd.com/film/practical-magic/">${review("a", "★★★★★", "Loved it")}${review("b", "★½", "Not for me at all")}${review("c", "★★★", "Fine")}`,
+      );
+    }
+    return new Response("<title>Just a moment...</title>", { status: 403 });
+  });
+
+  const lowest = await client.fetchLetterboxdReviewsDirect("tt0120791", 1, "lowest");
+  assert.deepEqual(
+    lowest.reviews.map((r) => r.author),
+    ["b", "c", "a"],
+  );
+  assert.deepEqual(requests, [
+    "https://letterboxd.com/imdb/tt0120791/",
+    "https://letterboxd.com/film/practical-magic/reviews/by/entry-rating-lowest/",
+  ]);
+
+  const longest = await client.fetchLetterboxdReviewsDirect("tt0120791", 1, "longest");
+  assert.deepEqual(
+    longest.reviews.map((r) => r.author),
+    ["b", "a", "c"],
+  );
+});
+
+test("Letterboxd star labels read as numbers", () => {
+  const client = loadClient(async () => new Response(""));
+  assert.equal(client.letterboxdStars("★★★½"), 3.5);
+  assert.equal(client.letterboxdStars("½"), 0.5);
+  assert.equal(client.letterboxdStars(null), null);
+});

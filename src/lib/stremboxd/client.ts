@@ -219,8 +219,7 @@ export type LetterboxdReview = {
 };
 
 // Scrape reviews directly from letterboxd.com — bypasses Stremboxd's 2-review
-// English-only limit. Returns up to 12 reviews with full text, author, avatar,
-// rating stars, language, and date. Supports pagination via page parameter.
+// English-only limit (see fetchLetterboxdReviewsDirect below).
 // Cloudflare-protected fetch helper — sends browser-like headers that
 // harbor_fetch (Rust reqwest) uses to bypass Letterboxd's Cloudflare challenge.
 // safeFetch already sends a good User-Agent via harbor_fetch, but we add
@@ -246,106 +245,148 @@ async function fetchWithCloudflareBypass(url: string): Promise<Response> {
   }
 }
 
-// Fetch reviews from the film's MAIN page (letterboxd.com/imdb/{imdbId}/) which
-// is NOT Cloudflare-protected (returns 200), unlike /reviews/ which returns 403.
-// The main page contains popular reviews in the same `article.production-viewing`
-// structure as the reviews page.
-export async function fetchLetterboxdReviewsDirect(
-  imdbId: string,
-  page = 1,
-  _sortBy: "newest" | "popular" = "popular",
-): Promise<{ reviews: LetterboxdReview[]; hasNext: boolean }> {
-  console.log(`[Letterboxd] fetchReviewsDirect imdb=${imdbId} page=${page}`);
+export type LetterboxdReviewSort = "popular" | "newest" | "highest" | "lowest" | "longest";
 
-  // The IMDb redirect page IS the film's main page and returns 200.
-  // It contains popular reviews inline. We only fetch page 1 from the main page.
-  // For pagination we'd need /reviews/ which is 403'd, so we return all we got.
-  const url = `https://letterboxd.com/imdb/${imdbId}/`;
+// Letterboxd's own review orders (/film/{slug}/reviews/by/...). "longest" has no server order:
+// it sorts the popular reviews by length.
+const SORT_PATH: Record<LetterboxdReviewSort, string> = {
+  popular: "by/activity/",
+  newest: "by/added/",
+  highest: "by/entry-rating/",
+  lowest: "by/entry-rating-lowest/",
+  longest: "by/activity/",
+};
+const REVIEW_PAGES = 3; // 12 reviews per page
+const slugCache = new Map<string, string>();
 
-  let html: string;
-  let status = 0;
+function isChallenge(html: string): boolean {
+  return html.includes("Just a moment...") || html.includes("__cf_chl_opt");
+}
+
+async function fetchLetterboxdHtml(url: string): Promise<string | null> {
   try {
     const res = await fetchWithCloudflareBypass(url);
-    status = res.status;
-    if (!res.ok) {
-      console.warn(`[Letterboxd] film page HTTP ${res.status}`);
-      return { reviews: [], hasNext: false };
-    }
-    html = await res.text();
-  } catch (e) {
-    console.error("[Letterboxd] film page fetch error:", e);
-    return { reviews: [], hasNext: false };
+    if (!res.ok) return null;
+    const html = await res.text();
+    return isChallenge(html) ? null : html;
+  } catch {
+    return null;
   }
+}
 
-  console.log(`[Letterboxd] film page status=${status}, html length=${html.length}`);
+type ParsedReview = LetterboxdReview & { fullTextUrl: string | null };
 
-  // Cloudflare check
-  if (html.includes("Just a moment...") || html.includes("__cf_chl_opt")) {
-    console.warn("[Letterboxd] Cloudflare challenge detected");
-    return { reviews: [], hasNext: false };
-  }
-
-  // Parse the film page — extract slug AND reviews from the same HTML
-  const slugMatch = html.match(/letterboxd\.com\/film\/([^/"'?\s#]+)/);
-  const slug = slugMatch ? slugMatch[1]! : null;
-
-  // Parse reviews from the HTML using DOMParser
+function parseReviewArticles(html: string, pageUrl: string): ParsedReview[] {
   const doc = new DOMParser().parseFromString(html, "text/html");
-  // Set base URL so relative hrefs resolve correctly
-  const baseUrlEl = doc.querySelector("base");
-  if (!baseUrlEl) {
-    const baseTag = doc.createElement("base");
-    baseTag.href = "https://letterboxd.com";
-    doc.head.appendChild(baseTag);
-  }
-  const articles = doc.querySelectorAll("article.production-viewing");
-  console.log(`[Letterboxd] found ${articles.length} articles on film page (slug=${slug})`);
-
-  const reviews: LetterboxdReview[] = [];
-  const reviewsPageUrl = slug ? `https://letterboxd.com/film/${slug}/reviews/` : url;
-
-  for (const art of articles) {
-    // Only parse articles that have a review body (some are just activity entries)
+  const abs = (path: string) => (path.startsWith("http") ? path : `https://letterboxd.com${path}`);
+  const reviews: ParsedReview[] = [];
+  for (const art of doc.querySelectorAll("article.production-viewing")) {
+    // Only articles with a review body (some are plain activity entries).
     const bodyEl = art.querySelector(".js-review-body") as HTMLElement | null;
-    if (!bodyEl) continue;
+    const text = bodyEl?.textContent?.trim() ?? "";
+    if (!bodyEl || !text) continue;
+    const authorPath = art.querySelector("a.avatar")?.getAttribute("href") ?? "";
+    const avatarSrc = art.querySelector("a.avatar img")?.getAttribute("src") ?? "";
+    reviews.push({
+      text,
+      author: art.querySelector(".displayname")?.textContent?.trim() ?? "",
+      authorUrl: authorPath ? abs(authorPath) : "",
+      avatar: avatarSrc ? abs(avatarSrc) : null,
+      rating: art.querySelector(".inline-rating svg")?.getAttribute("aria-label") ?? null,
+      lang: bodyEl.getAttribute("lang") ?? null,
+      date: art.querySelector("time.timestamp")?.getAttribute("datetime") ?? null,
+      url: pageUrl,
+      fullTextUrl: bodyEl.getAttribute("data-full-text-url"),
+    });
+  }
+  return reviews;
+}
 
-    let text = bodyEl.textContent?.trim() ?? "";
-    if (!text) continue;
+// Lists cut long reviews short with "…"; each review links its full text.
+async function expandTruncated(reviews: ParsedReview[]): Promise<void> {
+  await Promise.all(
+    reviews
+      .filter((r) => r.fullTextUrl && /(…|\.\.\.)$/.test(r.text))
+      .map(async (r) => {
+        const html = await fetchLetterboxdHtml(`https://letterboxd.com${r.fullTextUrl}`);
+        if (!html) return;
+        const paragraphs = [...new DOMParser().parseFromString(html, "text/html").querySelectorAll("p")]
+          .map((p) => p.textContent?.trim() ?? "")
+          .filter(Boolean);
+        if (paragraphs.length) r.text = paragraphs.join("\n\n");
+      }),
+  );
+}
 
-    // If the review is hidden/truncated, the text is still in the element
-    // (just visually hidden via CSS) — we use what's available
-    const authorEl = art.querySelector(".displayname");
-    const author = authorEl?.textContent?.trim() ?? "";
-    const authorLink = art.querySelector("a.avatar") as HTMLAnchorElement | null;
-    // Resolve relative URLs to absolute
-    const authorPath = authorLink?.getAttribute("href") ?? "";
-    const authorUrl = authorPath
-      ? authorPath.startsWith("http")
-        ? authorPath
-        : `https://letterboxd.com${authorPath}`
-      : "";
-    const avatarImg = art.querySelector("a.avatar img") as HTMLImageElement | null;
-    const avatarSrc = avatarImg?.getAttribute("src") ?? "";
-    const avatar = avatarSrc
-      ? avatarSrc.startsWith("http")
-        ? avatarSrc
-        : `https://letterboxd.com${avatarSrc}`
-      : null;
+/** Stars as a number ("★★★½" → 3.5), or null when the review has no rating. */
+export function letterboxdStars(rating: string | null): number | null {
+  if (!rating) return null;
+  const stars = (rating.match(/★/g) ?? []).length + (rating.includes("½") ? 0.5 : 0);
+  return stars || null;
+}
 
-    const ratingSvg = art.querySelector(".inline-rating svg") as SVGSVGElement | null;
-    const rating = ratingSvg?.getAttribute("aria-label") ?? null;
+// The film page's popular reviews have no dates, so "newest" keeps them as they are.
+export function sortLetterboxdReviews<T extends LetterboxdReview>(
+  reviews: T[],
+  sortBy: LetterboxdReviewSort,
+): T[] {
+  const time = (r: T) => (r.date ? Date.parse(r.date) || 0 : 0);
+  const compare: Record<LetterboxdReviewSort, ((a: T, b: T) => number) | null> = {
+    popular: null,
+    newest: (a, b) => time(b) - time(a),
+    // Unrated reviews go last in both rating orders.
+    highest: (a, b) => (letterboxdStars(b.rating) ?? -1) - (letterboxdStars(a.rating) ?? -1),
+    lowest: (a, b) => (letterboxdStars(a.rating) ?? 6) - (letterboxdStars(b.rating) ?? 6),
+    longest: (a, b) => b.text.length - a.text.length,
+  };
+  const fn = compare[sortBy];
+  return fn ? [...reviews].sort(fn) : reviews;
+}
 
-    const lang = bodyEl.getAttribute("lang") ?? null;
+const strip = ({ fullTextUrl: _drop, ...review }: ParsedReview): LetterboxdReview => review;
 
-    const dateEl = art.querySelector("time.timestamp") as HTMLElement | null;
-    const date = dateEl?.getAttribute("datetime") ?? null;
-
-    reviews.push({ text, author, authorUrl, avatar, rating, lang, date, url: reviewsPageUrl });
+// Reviews for a film in one of Letterboxd's review orders. Reads the first few sorted review
+// pages one after another (parallel requests get challenged). /reviews/ is often behind
+// Cloudflare (403); then it falls back to the popular reviews on the film's main page, which
+// is not, and sorts those here.
+export async function fetchLetterboxdReviewsDirect(
+  imdbId: string,
+  _page = 1,
+  sortBy: LetterboxdReviewSort = "popular",
+): Promise<{ reviews: LetterboxdReview[]; hasNext: boolean }> {
+  // The IMDb redirect page IS the film's main page: it carries the slug and popular reviews.
+  const filmPage = `https://letterboxd.com/imdb/${imdbId}/`;
+  let slug = slugCache.get(imdbId) ?? null;
+  let filmHtml: string | null = null;
+  if (!slug) {
+    filmHtml = await fetchLetterboxdHtml(filmPage);
+    if (!filmHtml) return { reviews: [], hasNext: false };
+    slug = filmHtml.match(/letterboxd\.com\/film\/([^/"'?\s#]+)/)?.[1] ?? null;
+    if (slug) slugCache.set(imdbId, slug);
   }
 
-  // The main page doesn't have pagination — all reviews are on one page
-  console.log(`[Letterboxd] parsed ${reviews.length} reviews from film page`);
-  return { reviews, hasNext: false };
+  const reviewsUrl = slug ? `https://letterboxd.com/film/${slug}/reviews/` : filmPage;
+  let reviews: ParsedReview[] = [];
+  let serverOrder = false;
+  if (slug) {
+    for (let page = 1; page <= REVIEW_PAGES; page++) {
+      const html = await fetchLetterboxdHtml(
+        `${reviewsUrl}${SORT_PATH[sortBy]}${page > 1 ? `page/${page}/` : ""}`,
+      );
+      const found = html ? parseReviewArticles(html, reviewsUrl) : [];
+      if (!found.length) break;
+      reviews.push(...found);
+      serverOrder = true;
+    }
+  }
+  if (!reviews.length) {
+    filmHtml ??= await fetchLetterboxdHtml(filmPage);
+    if (filmHtml) reviews = parseReviewArticles(filmHtml, reviewsUrl);
+  }
+
+  await expandTruncated(reviews);
+  if (!serverOrder || sortBy === "longest") reviews = sortLetterboxdReviews(reviews, sortBy);
+  return { reviews: reviews.map(strip), hasNext: false };
 }
 
 // Fetch friends' reviews — uses letterboxd.com/{username}/friends/film/{slug}/reviews/

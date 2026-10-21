@@ -7,10 +7,12 @@ import {
   fetchLetterboxdFriendsReviews,
   fetchLetterboxdReviewsDirect,
   type LetterboxdReview,
+  type LetterboxdReviewSort,
 } from "@/lib/stremboxd/client";
 import { openUrl } from "@/lib/window";
-import { useT } from "@/lib/i18n";
+import { LANGUAGES, useT, useUiLanguage } from "@/lib/i18n";
 import { useSettings } from "@/lib/settings";
+import { ReviewTranslateBar, ReviewTranslateButton, useReviewTranslator } from "./review-translation";
 
 class ReviewsBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
@@ -27,6 +29,14 @@ class ReviewsBoundary extends Component<{ children: ReactNode }, { failed: boole
 }
 
 type Filter = "all" | "friends";
+
+const SORTS: { key: LetterboxdReviewSort; label: string }[] = [
+  { key: "popular", label: "Most liked" },
+  { key: "newest", label: "Most recent" },
+  { key: "highest", label: "Highest rated" },
+  { key: "lowest", label: "Lowest rated" },
+  { key: "longest", label: "Longest" },
+];
 
 export function LetterboxdReviews({ meta, imdbId }: { meta: Meta; imdbId: string | null }) {
   const lb = useLetterboxd();
@@ -52,6 +62,10 @@ function LetterboxdReviewsInner({ meta, imdbId }: { meta: Meta; imdbId: string |
   const [showAll, setShowAll] = useState(false); // "Load more" toggle
   const { settings } = useSettings();
   const [blurred, setBlurred] = useState(true);
+  const [sort, setSort] = useState<LetterboxdReviewSort>("popular");
+  const [ownLanguage, setOwnLanguage] = useState(false);
+  const uiLanguage = useUiLanguage();
+  const tr = useReviewTranslator();
 
   const effectiveImdbId = imdbId ?? (meta.id.startsWith("tt") ? meta.id : null);
 
@@ -64,7 +78,7 @@ function LetterboxdReviewsInner({ meta, imdbId }: { meta: Meta; imdbId: string |
     setReviews([]);
     setShowAll(false);
     try {
-      const result = await fetchLetterboxdReviewsDirect(effectiveImdbId);
+      const result = await fetchLetterboxdReviewsDirect(effectiveImdbId, 1, sort);
       setReviews(result.reviews);
       if (result.reviews[0]?.url) {
         const m = result.reviews[0].url.match(/letterboxd\.com\/film\/([^/]+)/);
@@ -90,7 +104,7 @@ function LetterboxdReviewsInner({ meta, imdbId }: { meta: Meta; imdbId: string |
         setLoadingFriends(false);
       }
     }
-  }, [effectiveImdbId, lb.isFullConnected, lb.username]);
+  }, [effectiveImdbId, lb.isFullConnected, lb.username, sort]);
 
   useEffect(() => {
     fetchReviews();
@@ -123,7 +137,7 @@ function LetterboxdReviewsInner({ meta, imdbId }: { meta: Meta; imdbId: string |
   }
 
   // Fallback if nothing loaded
-  if (tried && reviews.length === 0 && !loading) {
+  if (tried && reviews.length === 0 && !loading && sort === "popular") {
     const filmUrl = effectiveImdbId ? `https://letterboxd.com/imdb/${effectiveImdbId}/reviews/` : null;
     return (
       <section>
@@ -148,7 +162,10 @@ function LetterboxdReviewsInner({ meta, imdbId }: { meta: Meta; imdbId: string |
   }
 
   // Friends = use friends reviews (from /{username}/friends/film/{slug}/reviews/)
-  const filtered = filter === "friends" ? friendsReviews : reviews;
+  const listed = filter === "friends" ? friendsReviews : reviews;
+  // Letterboxd tags each review body with its language.
+  const filtered = ownLanguage ? listed.filter((r) => r.lang?.startsWith(uiLanguage)) : listed;
+  const languageLabel = LANGUAGES.find(({ code }) => code === uiLanguage)?.label ?? "";
 
   // Show first 5 by default, "Load more" reveals the rest
   const VISIBLE_COUNT = 5;
@@ -212,9 +229,40 @@ function LetterboxdReviewsInner({ meta, imdbId }: { meta: Meta; imdbId: string |
         </div>
       </div>
 
+      <div className="mb-4 flex flex-wrap items-center gap-1.5">
+        {filter === "all" && (
+          <div className="flex flex-wrap gap-1.5" role="group" aria-label={t("Sort reviews")}>
+            {SORTS.map((s) => (
+              <SortChip
+                key={s.key}
+                active={sort === s.key}
+                disabled={loading}
+                onClick={() => sort !== s.key && setSort(s.key)}
+                label={t(s.label)}
+              />
+            ))}
+          </div>
+        )}
+        {uiLanguage !== "en" && (
+          <SortChip
+            active={ownLanguage}
+            onClick={() => {
+              setOwnLanguage((v) => !v);
+              setShowAll(false);
+            }}
+            label={t("In {language}", { language: t(languageLabel) })}
+          />
+        )}
+        <div className="ms-auto">
+          <ReviewTranslateBar tr={tr} texts={visible.map((r) => r.text)} />
+        </div>
+      </div>
+
       {filtered.length === 0 && !loading && (
         <p className="text-[14px] text-ink-muted py-4">
-          {filter === "friends"
+          {ownLanguage
+            ? t("No reviews in {language} here.", { language: t(languageLabel) })
+            : filter === "friends"
             ? loadingFriends
               ? t("Loading friends' reviews…")
               : t("No reviews from your friends for this film.")
@@ -279,9 +327,12 @@ function LetterboxdReviewsInner({ meta, imdbId }: { meta: Meta; imdbId: string |
                       {new Date(review.date).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}
                     </span>
                   )}
+                  <span className={review.date ? "" : "ms-auto"}>
+                    <ReviewTranslateButton tr={tr} text={review.text} />
+                  </span>
                 </div>
                 <p className="mt-1.5 whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink-muted" dir="auto">
-                  {review.text}
+                  {tr.display(review.text)}
                 </p>
               </div>
             </div>
@@ -301,6 +352,32 @@ function LetterboxdReviewsInner({ meta, imdbId }: { meta: Meta; imdbId: string |
         </div>
       )}
     </section>
+  );
+}
+
+function SortChip({
+  active,
+  disabled,
+  onClick,
+  label,
+}: {
+  active: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      disabled={disabled}
+      onClick={onClick}
+      className={`rounded-full px-3 py-1 text-[12px] font-medium transition-colors disabled:opacity-60 ${
+        active ? "bg-ink text-canvas" : "bg-white/[0.06] text-ink-muted hover:bg-white/[0.10] hover:text-ink"
+      }`}
+    >
+      {label}
+    </button>
   );
 }
 

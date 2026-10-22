@@ -26,15 +26,55 @@ export function cachedReviewTranslation(text: string, to: UiLanguage): string | 
   return cache.get(cacheKey(text, to)) ?? null;
 }
 
-function chunks(text: string): string[] {
-  const out: string[] = [];
-  let current = "";
-  for (const paragraph of text.split(/\n{2,}/)) {
-    if (current && current.length + paragraph.length > GOOGLE_CHUNK) {
-      out.push(current);
-      current = "";
+type Chunk = { text: string; glue: string };
+
+// Cuts a paragraph longer than the limit near the limit: at a sentence end, else at a space,
+// else mid-word. `glue` is what joined the piece to the previous one.
+function splitParagraph(paragraph: string): Chunk[] {
+  const out: Chunk[] = [];
+  let rest = paragraph;
+  let glue = "";
+  while (rest.length > GOOGLE_CHUNK) {
+    const window = rest.slice(0, GOOGLE_CHUNK);
+    const floor = GOOGLE_CHUNK / 2;
+    let cut = -1;
+    const sentenceEnd = /[.!?…。！？؟]["'”’)\]]*(\s+)/g;
+    for (let m = sentenceEnd.exec(window); m; m = sentenceEnd.exec(window)) {
+      if (m.index >= floor) cut = m.index + m[0].length - m[1]!.length;
     }
-    current = current ? `${current}\n\n${paragraph}` : paragraph;
+    if (cut < 0) cut = window.lastIndexOf(" ") >= floor ? window.lastIndexOf(" ") : GOOGLE_CHUNK;
+    out.push({ text: rest.slice(0, cut), glue });
+    const next = rest.slice(cut);
+    const space = next.length - next.trimStart().length;
+    glue = space ? " " : "";
+    rest = next.slice(space);
+  }
+  out.push({ text: rest, glue });
+  return out;
+}
+
+export function translationChunks(text: string): Chunk[] {
+  const out: Chunk[] = [];
+  let current: Chunk | null = null;
+  const paragraphs = text.split(/\n{2,}/);
+  for (let i = 0; i < paragraphs.length; i++) {
+    const paragraph = paragraphs[i]!;
+    const glue = i ? "\n\n" : "";
+    if (paragraph.length > GOOGLE_CHUNK) {
+      if (current) out.push(current);
+      current = null;
+      const pieces = splitParagraph(paragraph);
+      pieces[0]!.glue = glue;
+      out.push(...pieces);
+      continue;
+    }
+    if (current && current.text.length + paragraph.length + 2 > GOOGLE_CHUNK) {
+      out.push(current);
+      current = null;
+    }
+    current = current
+      ? { text: `${current.text}\n\n${paragraph}`, glue: current.glue }
+      : { text: paragraph, glue };
   }
   if (current) out.push(current);
   return out;
@@ -43,22 +83,22 @@ function chunks(text: string): string[] {
 async function googleTranslate(text: string, to: UiLanguage): Promise<string | null> {
   // Google names Simplified Chinese "zh-CN".
   const target = to === "zh" ? "zh-CN" : to;
-  const parts: string[] = [];
-  for (const chunk of chunks(text)) {
+  let result = "";
+  for (const chunk of translationChunks(text)) {
     const params = new URLSearchParams({
       client: "gtx",
       sl: "auto",
       tl: target,
       dt: "t",
-      q: chunk,
+      q: chunk.text,
     });
     const res = await safeFetch(`${GOOGLE_URL}?${params}`).catch(() => null);
     if (!res?.ok) return null;
     const data = (await res.json().catch(() => null)) as [Array<[string]>] | null;
     if (!Array.isArray(data?.[0])) return null;
-    parts.push(data[0].map((segment) => segment[0]).join(""));
+    result += chunk.glue + data[0].map((segment) => segment[0]).join("");
   }
-  return parts.join("\n\n");
+  return result;
 }
 
 async function aiTranslate(

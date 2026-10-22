@@ -16,6 +16,8 @@ import type { GridEpisode } from "./episode-grid-types";
 import { FillerBadge, UpcomingBadge } from "./badges";
 import { isUpcomingDate } from "./helpers";
 import { EpisodeRatingBadge } from "./episode-rating-badge";
+import { EpisodeReviewsButton } from "./episode-reviews-dialog";
+import { episodeReviewsTarget } from "@/lib/episode-reviews";
 
 type Progress = { ratio: number; watched: boolean; startedAt: number };
 
@@ -75,6 +77,8 @@ export function AnimeEpisodeStrip({
           upcoming: isUpcomingDate(ep.airdate) || (!!unairedIds && unairedIds.has(ep.id)),
           meta: epMeta,
           sourceMetaId: ep.sourceMetaId,
+          // Anime numbering differs from IMDb's, so reviews use the IMDb season and episode.
+          reviews: episodeReviewsTarget(ep.imdbId, ep.imdbSeason, ep.imdbEpisode),
           play: (opts) =>
             openPicker(
               epMeta,
@@ -244,6 +248,7 @@ function AnimeEpisodeStripCard({
             {upcoming && ep.airdate ? ` · ${formatAirDate(ep.airdate)}` : ""}
           </span>
         </button>
+        <AnimeReviewsButton meta={meta} ep={ep} />
         <HoverTooltip label={t("Episode details")} align="center" className="shrink-0">
           <button
             type="button"
@@ -265,5 +270,21 @@ function AnimeEpisodeStripCard({
         </HoverTooltip>
       </div>
     </div>
+  );
+}
+
+/** Reviews for an anime episode, when it maps onto an IMDb season and episode. */
+export function AnimeReviewsButton({ meta, ep, compact = true }: { meta: Meta; ep: KitsuEpisode; compact?: boolean }) {
+  const target = episodeReviewsTarget(ep.imdbId, ep.imdbSeason, ep.imdbEpisode);
+  if (!target) return null;
+  return (
+    <EpisodeReviewsButton
+      meta={meta}
+      seriesImdbId={target.imdbId}
+      season={target.season}
+      episode={target.episode}
+      episodeTitle={ep.title || undefined}
+      compact={compact}
+    />
   );
 }

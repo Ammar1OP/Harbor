@@ -49,3 +49,31 @@ test("a failed translation comes back as null", async () => {
   const { translateReviews } = loadTranslation(async () => new Response("", { status: 429 }));
   assert.deepEqual(await translateReviews(["Slow but rewarding"], "ar", null), [null]);
 });
+
+test("long reviews without paragraph breaks are split near the chunk limit", () => {
+  const { translationChunks } = loadTranslation(async () => new Response(""));
+  const sentence = "This episode builds tension slowly and pays it off. ";
+  const text = sentence.repeat(Math.ceil(12_500 / sentence.length)).trim();
+  const chunks = translationChunks(text);
+  assert.ok(chunks.length >= 4, `only ${chunks.length} chunks`);
+  for (const chunk of chunks) assert.ok(chunk.text.length <= 3500, `${chunk.text.length} chars`);
+  // Pieces of one paragraph rejoin with the space they were cut at, not a paragraph break.
+  assert.equal(chunks.map((c) => c.glue + c.text).join(""), text);
+  assert.ok(chunks.slice(0, -1).every((c) => c.text.endsWith(".")));
+});
+
+test("a single word longer than the limit is still cut", () => {
+  const { translationChunks } = loadTranslation(async () => new Response(""));
+  const text = "x".repeat(8000);
+  const chunks = translationChunks(text);
+  assert.deepEqual(
+    chunks.map((c) => c.text.length),
+    [3500, 3500, 1000],
+  );
+  assert.equal(chunks.map((c) => c.glue + c.text).join(""), text);
+});
+
+test("short paragraphs still share a request", () => {
+  const { translationChunks } = loadTranslation(async () => new Response(""));
+  assert.deepEqual(translationChunks("One.\n\nTwo."), [{ text: "One.\n\nTwo.", glue: "" }]);
+});

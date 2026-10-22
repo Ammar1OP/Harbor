@@ -137,7 +137,7 @@ export function EpisodeReviewsDialog({
   );
 }
 
-function ReviewCard({ review, tr }: { review: EpisodeReview; tr: ReviewTranslator }) {
+export function ReviewCard({ review, tr }: { review: EpisodeReview; tr: ReviewTranslator }) {
   const t = useT();
   const [revealed, setRevealed] = useState(!review.spoiler);
   const [expanded, setExpanded] = useState(false);
@@ -199,20 +199,23 @@ function ReviewCard({ review, tr }: { review: EpisodeReview; tr: ReviewTranslato
           )}
         </span>
       </div>
-      {review.title && (
-        <h3 className="mt-2 text-[14px] font-semibold text-ink" dir="auto">
-          {tr.display(review.title)}
-        </h3>
-      )}
-      <div className="relative mt-1.5">
-        <p
-          dir="auto"
-          className={`whitespace-pre-wrap break-words text-[13.5px] leading-relaxed text-ink-muted ${
-            long && !expanded ? "line-clamp-[7]" : ""
-          } ${revealed ? "" : "select-none blur-[6px]"}`}
-        >
-          {tr.display(review.text)}
-        </p>
+      {/* The title can spoil as much as the body, so both sit behind the same reveal. */}
+      <div className="relative mt-2">
+        <div className={revealed ? "" : "select-none blur-[6px]"} aria-hidden={!revealed}>
+          {review.title && (
+            <h3 className="mb-1.5 text-[14px] font-semibold text-ink" dir="auto">
+              {tr.display(review.title)}
+            </h3>
+          )}
+          <p
+            dir="auto"
+            className={`whitespace-pre-wrap break-words text-[13.5px] leading-relaxed text-ink-muted ${
+              long && !expanded ? "line-clamp-[7]" : ""
+            }`}
+          >
+            {tr.display(review.text)}
+          </p>
+        </div>
         {!revealed && (
           <button
             type="button"
@@ -236,6 +239,36 @@ function ReviewCard({ review, tr }: { review: EpisodeReview; tr: ReviewTranslato
   );
 }
 
+/** The reviews icon on its own, for cards that keep the dialog's open state themselves. */
+export function EpisodeReviewsIconButton({
+  onClick,
+  compact = false,
+  className = "shrink-0 self-center",
+}: {
+  onClick: () => void;
+  compact?: boolean;
+  className?: string;
+}) {
+  const t = useT();
+  return (
+    <HoverTooltip label={t("Episode reviews")} align="center" className={className}>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onClick();
+        }}
+        aria-label={t("Episode reviews")}
+        className={`flex items-center justify-center rounded-full text-ink-subtle transition-colors hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink ${
+          compact ? "p-1.5" : "h-10 w-10"
+        }`}
+      >
+        <MessageSquareText size={compact ? 16 : 18} strokeWidth={2} />
+      </button>
+    </HoverTooltip>
+  );
+}
+
 /** "Reviews" button for an episode row; opens the dialog. Hidden when the show has no IMDb id. */
 export function EpisodeReviewsButton({
   meta,
@@ -252,27 +285,12 @@ export function EpisodeReviewsButton({
   episodeTitle?: string;
   compact?: boolean;
 }) {
-  const t = useT();
   const [open, setOpen] = useState(false);
   const imdbId = seriesImdbId ?? /^tt\d+/.exec(meta.id)?.[0] ?? null;
   if (!imdbId) return null;
   return (
     <>
-      <HoverTooltip label={t("Episode reviews")} align="center" className="shrink-0 self-center">
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            setOpen(true);
-          }}
-          aria-label={t("Episode reviews")}
-          className={`flex items-center justify-center rounded-full text-ink-subtle transition-colors hover:bg-elevated hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink ${
-            compact ? "p-1.5" : "h-10 w-10"
-          }`}
-        >
-          <MessageSquareText size={compact ? 16 : 18} strokeWidth={2} />
-        </button>
-      </HoverTooltip>
+      <EpisodeReviewsIconButton onClick={() => setOpen(true)} compact={compact} />
       {open && (
         <EpisodeReviewsDialog
           seriesImdbId={imdbId}

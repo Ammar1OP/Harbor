@@ -56,6 +56,17 @@ async function imdbQuery<T>(query: string): Promise<T | null> {
 }
 
 const IMDB_ID = /^tt\d+$/;
+
+/** Where an episode's reviews are found: the series' IMDb id and IMDb's own numbering. */
+export function episodeReviewsTarget(
+  imdbId: string | null | undefined,
+  season: number | null | undefined,
+  episode: number | null | undefined,
+): { imdbId: string; season: number; episode: number } | undefined {
+  return imdbId && IMDB_ID.test(imdbId) && season != null && episode != null
+    ? { imdbId, season, episode }
+    : undefined;
+}
 const seasonEpisodes = new Map<string, Map<string, string>>();
 
 /** IMDb id of an episode, from the series' IMDb id. */

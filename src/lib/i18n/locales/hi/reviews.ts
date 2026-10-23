@@ -16,4 +16,8 @@ export default {
   "Translate": "अनुवाद करें",
   "In {language}": "{language} में",
   "No reviews in {language} here.": "यहाँ {language} में कोई समीक्षा नहीं है।",
+  "{n} reviews couldn't be translated. Try again.": "{n} समीक्षाओं का अनुवाद नहीं हो सका। फिर से कोशिश करें।",
+  "Couldn't translate. Try again": "अनुवाद नहीं हो सका। फिर से कोशिश करें",
+  "Letterboxd didn't share review dates right now, so these are shown by popularity.": "Letterboxd अभी समीक्षाओं की तारीखें नहीं दे रहा, इसलिए ये लोकप्रियता के क्रम में हैं।",
+  "Reviewers' average: {rating}": "समीक्षकों का औसत: {rating}",
 } as Record<string, string>;

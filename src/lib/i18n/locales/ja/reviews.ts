@@ -16,4 +16,8 @@ export default {
   "Translate": "翻訳",
   "In {language}": "{language}のみ",
   "No reviews in {language} here.": "{language}のレビューはありません。",
+  "{n} reviews couldn't be translated. Try again.": "{n} 件のレビューを翻訳できませんでした。もう一度お試しください。",
+  "Couldn't translate. Try again": "翻訳できませんでした。再試行",
+  "Letterboxd didn't share review dates right now, so these are shown by popularity.": "Letterboxd が現在レビューの日付を提供していないため、人気順で表示しています。",
+  "Reviewers' average: {rating}": "レビュアーの平均: {rating}",
 } as Record<string, string>;

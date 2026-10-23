@@ -24,10 +24,14 @@ export type ReviewTranslator = {
   display: (text: string) => string;
   isShown: (text: string) => boolean;
   isBusy: (text: string) => boolean;
+  /** The last attempt to translate this text failed; it can be tried again. */
+  isFailed: (text: string) => boolean;
   /** Shows or hides the translation of a review; `extra` (its title) follows the review. */
   toggle: (text: string, extra?: string[]) => void;
   translateAll: (texts: string[]) => void;
   busyAll: boolean;
+  /** How many reviews the last "Translate all" could not translate. */
+  failedAll: number;
 };
 
 /** Per-section translation state: which reviews show a translation, and into which language. */
@@ -37,7 +41,9 @@ export function useReviewTranslator(): ReviewTranslator {
   const [translated, setTranslated] = useState<Record<string, string>>({});
   const [shown, setShown] = useState<Set<string>>(() => new Set());
   const [busy, setBusy] = useState<Set<string>>(() => new Set());
+  const [failed, setFailed] = useState<Set<string>>(() => new Set());
   const [busyAll, setBusyAll] = useState(false);
+  const [failedAll, setFailedAll] = useState(0);
 
   const ai = useMemo<ReviewTranslationAi | null>(() => {
     const key = aiKey(settings);
@@ -46,26 +52,41 @@ export function useReviewTranslator(): ReviewTranslator {
 
   const slot = useCallback((text: string) => `${target}\u0000${text}`, [target]);
 
+  /** Translates the texts and shows them; resolves to how many could not be translated. */
   const run = useCallback(
-    async (texts: string[]) => {
+    async (texts: string[]): Promise<number> => {
       const pending = texts.filter((text) => text.trim() && !translated[slot(text)]);
+      let failures: string[] = [];
       if (pending.length) {
         setBusy((prev) => new Set([...prev, ...pending.map(slot)]));
-        const result = await translateReviews(pending, target, ai);
-        setTranslated((prev) => {
-          const next = { ...prev };
-          pending.forEach((text, i) => {
-            if (result[i]) next[slot(text)] = result[i]!;
+        try {
+          const result = await translateReviews(pending, target, ai);
+          failures = pending.filter((_, i) => !result[i]);
+          setTranslated((prev) => {
+            const next = { ...prev };
+            pending.forEach((text, i) => {
+              if (result[i]) next[slot(text)] = result[i]!;
+            });
+            return next;
           });
-          return next;
-        });
-        setBusy((prev) => {
+        } catch {
+          failures = pending;
+        } finally {
+          setBusy((prev) => {
+            const next = new Set(prev);
+            pending.forEach((text) => next.delete(slot(text)));
+            return next;
+          });
+        }
+        setFailed((prev) => {
           const next = new Set(prev);
           pending.forEach((text) => next.delete(slot(text)));
+          failures.forEach((text) => next.add(slot(text)));
           return next;
         });
       }
       setShown((prev) => new Set([...prev, ...texts.map(slot)]));
+      return failures.length;
     },
     [ai, slot, target, translated],
   );
@@ -83,6 +104,7 @@ export function useReviewTranslator(): ReviewTranslator {
     display: (text) => (shown.has(slot(text)) && translated[slot(text)]) || text,
     isShown: (text) => shown.has(slot(text)) && !!translated[slot(text)],
     isBusy: (text) => busy.has(slot(text)),
+    isFailed: (text) => failed.has(slot(text)) && !translated[slot(text)],
     toggle: (text, extra = []) => {
       const texts = [text, ...extra.filter((e) => e.trim())];
       if (shown.has(slot(text)) && translated[slot(text)]) {
@@ -94,10 +116,15 @@ export function useReviewTranslator(): ReviewTranslator {
       } else void run(texts);
     },
     translateAll: (texts) => {
+      if (busyAll) return;
       setBusyAll(true);
-      void run(texts).finally(() => setBusyAll(false));
+      setFailedAll(0);
+      void run(texts)
+        .then(setFailedAll)
+        .finally(() => setBusyAll(false));
     },
     busyAll,
+    failedAll,
   };
 }
 
@@ -106,7 +133,12 @@ export function ReviewTranslateBar({ tr, texts }: { tr: ReviewTranslator; texts:
   const t = useT();
   if (!texts.length) return null;
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex flex-wrap items-center justify-end gap-1.5">
+      {tr.failedAll > 0 && !tr.busyAll && (
+        <span role="status" className="text-[11.5px] text-danger">
+          {t("{n} reviews couldn't be translated. Try again.", { n: tr.failedAll })}
+        </span>
+      )}
       <select
         value={tr.target}
         onChange={(e) => tr.setTarget(e.target.value as UiLanguage)}
@@ -152,7 +184,11 @@ export function ReviewTranslateButton({
       className="flex shrink-0 items-center gap-1 text-[11.5px] font-semibold text-amber-300/80 transition-colors hover:text-amber-300 disabled:opacity-60"
     >
       {tr.isBusy(text) ? <Loader2 size={11} className="animate-spin" /> : <Languages size={11} />}
-      {tr.isShown(text) ? t("Show original") : t("Translate")}
+      {tr.isShown(text)
+        ? t("Show original")
+        : tr.isFailed(text)
+          ? t("Couldn't translate. Try again")
+          : t("Translate")}
     </button>
   );
 }

@@ -12,93 +12,175 @@ export type ReviewTranslationAi = { key: string; model: string; groq: boolean };
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const GOOGLE_URL = "https://translate.googleapis.com/translate_a/single";
-// Google's endpoint takes the text in the query string, so long reviews go in chunks.
-const GOOGLE_CHUNK = 3500;
+// Google takes the text in the query string, so a chunk is limited by its percent-encoded length:
+// an Arabic letter is 6 bytes there and a CJK character 9. This budget is for `q` alone and keeps
+// the whole URL well under the ~2K that the endpoint accepts.
+export const GOOGLE_QUERY_BUDGET = 1800;
+// A chunk Google rejects as too long is halved, at most this many times.
+const MAX_SPLITS = 3;
+const GOOGLE_CONCURRENCY = 4;
+const GOOGLE_RETRIES = 2;
+const RETRY_BASE_MS = 400;
 const AI_BATCH = 8;
+const CACHE_LIMIT = 500;
 
 const languageName = Object.fromEntries(
   LANGUAGES.map(({ code, label }) => [code, label]),
 ) as Record<UiLanguage, string>;
+// Insertion-ordered, so the oldest entry is the first key: a small LRU.
 const cache = new Map<string, string>();
+const inFlight = new Map<string, Promise<string | null>>();
 const cacheKey = (text: string, to: UiLanguage) => `${to}\u0000${text}`;
 
 export function cachedReviewTranslation(text: string, to: UiLanguage): string | null {
-  return cache.get(cacheKey(text, to)) ?? null;
+  const key = cacheKey(text, to);
+  const hit = cache.get(key);
+  if (hit == null) return null;
+  cache.delete(key);
+  cache.set(key, hit);
+  return hit;
 }
 
-type Chunk = { text: string; glue: string };
+function remember(text: string, to: UiLanguage, translated: string): void {
+  const key = cacheKey(text, to);
+  cache.delete(key);
+  cache.set(key, translated);
+  while (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value!);
+}
 
-// Cuts a paragraph longer than the limit near the limit: at a sentence end, else at a space,
-// else mid-word. `glue` is what joined the piece to the previous one.
-function splitParagraph(paragraph: string): Chunk[] {
+export type Chunk = { text: string; glue: string };
+
+const encodedLength = (text: string) => encodeURIComponent(text).length;
+const SENTENCE_END = /[.!?…。！？؟]["'”’)\]」』]*\s*$/u;
+
+// Cuts a paragraph that is over the budget into pieces that fit: at a sentence end, else at a
+// space, else between characters. Works on code points, so emoji and surrogate pairs stay whole.
+// `glue` is the whitespace the piece was cut at, to put the pieces back together.
+function splitParagraph(paragraph: string, budget: number): Chunk[] {
   const out: Chunk[] = [];
-  let rest = paragraph;
+  let rest = Array.from(paragraph);
   let glue = "";
-  while (rest.length > GOOGLE_CHUNK) {
-    const window = rest.slice(0, GOOGLE_CHUNK);
-    const floor = GOOGLE_CHUNK / 2;
-    let cut = -1;
-    const sentenceEnd = /[.!?…。！？؟]["'”’)\]]*(\s+)/g;
-    for (let m = sentenceEnd.exec(window); m; m = sentenceEnd.exec(window)) {
-      if (m.index >= floor) cut = m.index + m[0].length - m[1]!.length;
+  while (encodedLength(rest.join("")) > budget) {
+    // The longest prefix that fits.
+    let lo = 1;
+    let hi = rest.length;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (encodedLength(rest.slice(0, mid).join("")) <= budget) lo = mid;
+      else hi = mid - 1;
     }
-    if (cut < 0) cut = window.lastIndexOf(" ") >= floor ? window.lastIndexOf(" ") : GOOGLE_CHUNK;
-    out.push({ text: rest.slice(0, cut), glue });
-    const next = rest.slice(cut);
-    const space = next.length - next.trimStart().length;
-    glue = space ? " " : "";
-    rest = next.slice(space);
+    const fit = lo;
+    let cut = fit;
+    // Prefer the last sentence end, then the last space, in the second half of what fits.
+    for (let i = fit; i > fit / 2; i--) {
+      if (/\s/u.test(rest[i] ?? "") && SENTENCE_END.test(rest.slice(0, i).join(""))) {
+        cut = i;
+        break;
+      }
+    }
+    if (cut === fit) {
+      for (let i = fit; i > fit / 2; i--) {
+        if (/\s/u.test(rest[i] ?? "")) {
+          cut = i;
+          break;
+        }
+      }
+    }
+    out.push({ text: rest.slice(0, cut).join(""), glue });
+    let next = cut;
+    while (next < rest.length && /\s/u.test(rest[next]!)) next++;
+    glue = rest.slice(cut, next).join("");
+    rest = rest.slice(next);
   }
-  out.push({ text: rest, glue });
+  out.push({ text: rest.join(""), glue });
   return out;
 }
 
-export function translationChunks(text: string): Chunk[] {
+/** The pieces a review is sent to Google in; joining `glue + text` gives the review back. */
+export function translationChunks(text: string, budget = GOOGLE_QUERY_BUDGET): Chunk[] {
   const out: Chunk[] = [];
   let current: Chunk | null = null;
-  const paragraphs = text.split(/\n{2,}/);
-  for (let i = 0; i < paragraphs.length; i++) {
-    const paragraph = paragraphs[i]!;
-    const glue = i ? "\n\n" : "";
-    if (paragraph.length > GOOGLE_CHUNK) {
+  const parts = text.split(/(\n{2,})/);
+  for (let i = 0; i < parts.length; i += 2) {
+    const paragraph = parts[i]!;
+    const glue = i ? parts[i - 1]! : "";
+    if (encodedLength(paragraph) > budget) {
       if (current) out.push(current);
       current = null;
-      const pieces = splitParagraph(paragraph);
+      const pieces = splitParagraph(paragraph, budget);
       pieces[0]!.glue = glue;
       out.push(...pieces);
       continue;
     }
-    if (current && current.text.length + paragraph.length + 2 > GOOGLE_CHUNK) {
-      out.push(current);
-      current = null;
+    if (current && encodedLength(current.text + glue + paragraph) <= budget) {
+      current = { text: current.text + glue + paragraph, glue: current.glue };
+      continue;
     }
-    current = current
-      ? { text: `${current.text}\n\n${paragraph}`, glue: current.glue }
-      : { text: paragraph, glue };
+    if (current) out.push(current);
+    current = { text: paragraph, glue };
   }
   if (current) out.push(current);
   return out;
 }
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+type GoogleResult = { ok: true; text: string } | { ok: false; tooLong: boolean };
+
+async function googleRequest(text: string, target: string): Promise<GoogleResult> {
+  const params = new URLSearchParams({ client: "gtx", sl: "auto", tl: target, dt: "t", q: text });
+  for (let attempt = 0; ; attempt++) {
+    const res = await safeFetch(`${GOOGLE_URL}?${params}`).catch(() => null);
+    if (res?.ok) {
+      const data = (await res.json().catch(() => null)) as [Array<[string]>] | null;
+      if (!Array.isArray(data?.[0])) return { ok: false, tooLong: false };
+      return { ok: true, text: data[0].map((segment) => segment[0]).join("") };
+    }
+    const status = res?.status ?? 0;
+    if (status === 400 || status === 413 || status === 414) return { ok: false, tooLong: true };
+    // Rate limits, server errors and dropped connections get a couple of spaced-out retries.
+    if (attempt >= GOOGLE_RETRIES || !(status === 0 || status === 429 || status >= 500))
+      return { ok: false, tooLong: false };
+    await sleep(RETRY_BASE_MS * 2 ** attempt);
+  }
+}
+
 async function googleTranslate(text: string, to: UiLanguage): Promise<string | null> {
   // Google names Simplified Chinese "zh-CN".
   const target = to === "zh" ? "zh-CN" : to;
+  const translateChunk = async (
+    chunk: string,
+    budget: number,
+    splits: number,
+  ): Promise<string | null> => {
+    const result = await googleRequest(chunk, target);
+    if (result.ok) return result.text;
+    if (!result.tooLong || splits >= MAX_SPLITS) return null;
+    // Rejected as too long after all: send it again in smaller pieces.
+    let joined = "";
+    for (const piece of translationChunks(chunk, Math.floor(budget / 2))) {
+      const translated = await translateChunk(piece.text, Math.floor(budget / 2), splits + 1);
+      if (translated == null) return null;
+      joined += piece.glue + translated;
+    }
+    return joined;
+  };
   let result = "";
   for (const chunk of translationChunks(text)) {
-    const params = new URLSearchParams({
-      client: "gtx",
-      sl: "auto",
-      tl: target,
-      dt: "t",
-      q: chunk.text,
-    });
-    const res = await safeFetch(`${GOOGLE_URL}?${params}`).catch(() => null);
-    if (!res?.ok) return null;
-    const data = (await res.json().catch(() => null)) as [Array<[string]>] | null;
-    if (!Array.isArray(data?.[0])) return null;
-    result += chunk.glue + data[0].map((segment) => segment[0]).join("");
+    const translated = await translateChunk(chunk.text, GOOGLE_QUERY_BUDGET, 0);
+    if (translated == null) return null;
+    result += chunk.glue + translated;
   }
   return result;
+}
+
+/** Runs `task` over the items with at most `limit` running at once. */
+async function pool<T>(items: T[], limit: number, task: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) await task(items[next++]!);
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
 }
 
 async function aiTranslate(
@@ -140,10 +222,30 @@ async function aiTranslate(
     choices?: Array<{ message?: { content?: string } }>;
   } | null;
   const content = data?.choices?.[0]?.message?.content ?? "";
+  // A malformed or partial answer leaves the missing reviews null, and Google takes them.
   return texts.map((_, i) => {
     const match = content.match(new RegExp(`<r${i + 1}>([\\s\\S]*?)</r${i + 1}>`));
     return match?.[1]?.trim() || null;
   });
+}
+
+async function translateUncached(
+  texts: string[],
+  to: UiLanguage,
+  ai: ReviewTranslationAi | null,
+): Promise<(string | null)[]> {
+  const result: (string | null)[] = texts.map(() => null);
+  if (ai?.key.trim()) {
+    for (let start = 0; start < texts.length; start += AI_BATCH) {
+      const translated = await aiTranslate(texts.slice(start, start + AI_BATCH), to, ai);
+      translated.forEach((text, i) => (result[start + i] = text));
+    }
+  }
+  const left = texts.map((_, i) => i).filter((i) => result[i] == null);
+  await pool(left, GOOGLE_CONCURRENCY, async (i) => {
+    result[i] = await googleTranslate(texts[i]!, to);
+  });
+  return result;
 }
 
 /** Translations for each text, in order; null where every translator failed. */
@@ -152,29 +254,40 @@ export async function translateReviews(
   to: UiLanguage,
   ai: ReviewTranslationAi | null,
 ): Promise<(string | null)[]> {
-  const result = texts.map((text) => cachedReviewTranslation(text, to));
-  const missing = texts.map((_, i) => i).filter((i) => result[i] == null && texts[i]!.trim());
-  if (ai?.key.trim()) {
-    for (let start = 0; start < missing.length; start += AI_BATCH) {
-      const batch = missing.slice(start, start + AI_BATCH);
-      const translated = await aiTranslate(
-        batch.map((i) => texts[i]!),
-        to,
-        ai,
-      );
-      batch.forEach((index, i) => (result[index] = translated[i] ?? null));
-    }
-  }
-  await Promise.all(
-    missing
-      .filter((i) => result[i] == null)
-      .map(async (i) => {
-        result[i] = await googleTranslate(texts[i]!, to);
-      }),
-  );
+  const result = texts.map((text) => (text.trim() ? cachedReviewTranslation(text, to) : null));
+  // A review already being translated (an overlapping "Translate all", say) is awaited, not
+  // requested again.
+  const waiting: Promise<void>[] = [];
+  const fresh: string[] = [];
+  const freshIndexes: number[][] = [];
   texts.forEach((text, i) => {
-    const translated = result[i];
-    if (translated) cache.set(cacheKey(text, to), translated);
+    if (result[i] != null || !text.trim()) return;
+    const pending = inFlight.get(cacheKey(text, to));
+    if (pending) {
+      waiting.push(pending.then((translated) => void (result[i] = translated)));
+      return;
+    }
+    const at = fresh.indexOf(text);
+    if (at >= 0) freshIndexes[at]!.push(i);
+    else {
+      fresh.push(text);
+      freshIndexes.push([i]);
+    }
   });
+  if (fresh.length) {
+    const batch = translateUncached(fresh, to, ai);
+    fresh.forEach((text, n) => {
+      const one = batch.then((all) => all[n] ?? null);
+      inFlight.set(cacheKey(text, to), one);
+      waiting.push(
+        one.then((translated) => {
+          inFlight.delete(cacheKey(text, to));
+          if (translated) remember(text, to, translated);
+          for (const i of freshIndexes[n]!) result[i] = translated;
+        }),
+      );
+    });
+  }
+  await Promise.all(waiting);
   return result;
 }

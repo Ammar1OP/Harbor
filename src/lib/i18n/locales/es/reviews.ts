@@ -16,4 +16,8 @@ export default {
   "Translate": "Traducir",
   "In {language}": "En {language}",
   "No reviews in {language} here.": "No hay reseñas en {language} aquí.",
+  "{n} reviews couldn't be translated. Try again.": "No se pudieron traducir {n} reseñas. Inténtalo de nuevo.",
+  "Couldn't translate. Try again": "No se pudo traducir. Inténtalo de nuevo",
+  "Letterboxd didn't share review dates right now, so these are shown by popularity.": "Letterboxd no ha dado las fechas de las reseñas ahora, así que se muestran por popularidad.",
+  "Reviewers' average: {rating}": "Media de los reseñadores: {rating}",
 } as Record<string, string>;

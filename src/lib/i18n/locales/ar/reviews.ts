@@ -16,4 +16,8 @@ export default {
   "Translate": "ترجمة",
   "In {language}": "باللغة {language}",
   "No reviews in {language} here.": "لا توجد مراجعات باللغة {language} هنا.",
+  "{n} reviews couldn't be translated. Try again.": "تعذّرت ترجمة {n} من المراجعات. حاول مرة أخرى.",
+  "Couldn't translate. Try again": "تعذّرت الترجمة. حاول مرة أخرى",
+  "Letterboxd didn't share review dates right now, so these are shown by popularity.": "لم يوفّر Letterboxd تواريخ المراجعات الآن، لذا تظهر حسب الشعبية.",
+  "Reviewers' average: {rating}": "متوسط تقييم المراجعين: {rating}",
 } as Record<string, string>;

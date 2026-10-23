@@ -1,4 +1,12 @@
-import { Component, useCallback, useEffect, useState, type ErrorInfo, type ReactNode } from "react";
+import {
+  Component,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ErrorInfo,
+  type ReactNode,
+} from "react";
 import { ExternalLink, Heart, Loader2, MessageCircle, RefreshCw, Users } from "lucide-react";
 import { HoverTooltip } from "@/components/hover-tooltip";
 import type { Meta } from "@/lib/cinemeta";
@@ -64,12 +72,18 @@ function LetterboxdReviewsInner({ meta, imdbId }: { meta: Meta; imdbId: string |
   const [blurred, setBlurred] = useState(true);
   const [sort, setSort] = useState<LetterboxdReviewSort>("popular");
   const [ownLanguage, setOwnLanguage] = useState(false);
+  const [sortUnavailable, setSortUnavailable] = useState(false);
+  // Each fetch takes a number; only the latest may update the section, so a slow answer for an
+  // earlier sort (or film) never replaces a newer one.
+  const generation = useRef(0);
   const uiLanguage = useUiLanguage();
   const tr = useReviewTranslator();
 
   const effectiveImdbId = imdbId ?? (meta.id.startsWith("tt") ? meta.id : null);
 
   const fetchReviews = useCallback(async () => {
+    const id = ++generation.current;
+    const current = () => id === generation.current;
     if (!effectiveImdbId) {
       setTried(true);
       return;
@@ -77,31 +91,36 @@ function LetterboxdReviewsInner({ meta, imdbId }: { meta: Meta; imdbId: string |
     setLoading(true);
     setReviews([]);
     setShowAll(false);
+    setSortUnavailable(false);
     try {
       const result = await fetchLetterboxdReviewsDirect(effectiveImdbId, 1, sort);
+      if (!current()) return;
       setReviews(result.reviews);
+      setSortUnavailable(result.sortUnavailable);
       if (result.reviews[0]?.url) {
         const m = result.reviews[0].url.match(/letterboxd\.com\/film\/([^/]+)/);
         if (m) setFilmSlug(m[1]!);
       }
     } catch (e) {
-      console.error("[Letterboxd Reviews] fetch error:", e);
+      if (current()) console.error("[Letterboxd Reviews] fetch error:", e);
     } finally {
-      setLoading(false);
-      setTried(true);
+      if (current()) {
+        setLoading(false);
+        setTried(true);
+      }
     }
 
     // Also fetch friends reviews in parallel (if full mode connected)
-    if (lb.isFullConnected && lb.username) {
+    if (current() && lb.isFullConnected && lb.username) {
       setLoadingFriends(true);
       setFriendsReviews([]);
       try {
         const friends = await fetchLetterboxdFriendsReviews(lb.username, effectiveImdbId);
-        setFriendsReviews(friends);
+        if (current()) setFriendsReviews(friends);
       } catch (e) {
-        console.error("[Letterboxd Reviews] friends fetch error:", e);
+        if (current()) console.error("[Letterboxd Reviews] friends fetch error:", e);
       } finally {
-        setLoadingFriends(false);
+        if (current()) setLoadingFriends(false);
       }
     }
   }, [effectiveImdbId, lb.isFullConnected, lb.username, sort]);
@@ -109,11 +128,14 @@ function LetterboxdReviewsInner({ meta, imdbId }: { meta: Meta; imdbId: string |
   useEffect(() => {
     fetchReviews();
   }, [fetchReviews]);
+  // Unmounting retires whatever is still in flight.
+  useEffect(() => () => void ++generation.current, []);
 
   if (!effectiveImdbId) return null;
 
   // Skeleton while loading
-  if (loading && reviews.length === 0) {
+  // Only the first load shows the skeleton; later ones keep the sort chips in place.
+  if (loading && reviews.length === 0 && !tried) {
     return (
       <section>
         <div className="mb-5 flex items-center gap-2">
@@ -236,7 +258,6 @@ function LetterboxdReviewsInner({ meta, imdbId }: { meta: Meta; imdbId: string |
               <SortChip
                 key={s.key}
                 active={sort === s.key}
-                disabled={loading}
                 onClick={() => sort !== s.key && setSort(s.key)}
                 label={t(s.label)}
               />
@@ -258,6 +279,19 @@ function LetterboxdReviewsInner({ meta, imdbId }: { meta: Meta; imdbId: string |
         </div>
       </div>
 
+      {loading && (
+        <p className="flex items-center gap-2 py-4 text-[13px] text-ink-muted" role="status">
+          <Loader2 size={14} className="animate-spin" />
+          {t("Loading…")}
+        </p>
+      )}
+
+      {sortUnavailable && filter === "all" && !loading && (
+        <p role="status" className="mb-3 text-[12px] text-ink-subtle">
+          {t("Letterboxd didn't share review dates right now, so these are shown by popularity.")}
+        </p>
+      )}
+
       {filtered.length === 0 && !loading && (
         <p className="text-[14px] text-ink-muted py-4">
           {ownLanguage
@@ -266,7 +300,18 @@ function LetterboxdReviewsInner({ meta, imdbId }: { meta: Meta; imdbId: string |
             ? loadingFriends
               ? t("Loading friends' reviews…")
               : t("No reviews from your friends for this film.")
-            : t("No reviews yet.")}
+            : tried && reviews.length === 0
+              ? t("Reviews couldn't be loaded right now.")
+              : t("No reviews yet.")}
+          {filter === "all" && !ownLanguage && tried && reviews.length === 0 && (
+            <button
+              onClick={() => openUrl(`https://letterboxd.com/imdb/${effectiveImdbId}/reviews/`)}
+              className="ms-2 inline-flex items-center gap-1 font-semibold text-ink transition-colors hover:text-amber-300"
+            >
+              {t("View on Letterboxd")}
+              <ExternalLink size={11} strokeWidth={2.2} />
+            </button>
+          )}
         </p>
       )}
 

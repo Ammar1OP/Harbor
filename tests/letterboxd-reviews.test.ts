@@ -21,6 +21,7 @@ async function openDetails({
       useState: (initial: unknown) => [initial, () => {}],
       useCallback: (fn: unknown) => fn,
       useEffect: (fn: () => void) => effects.push(fn),
+      useRef: (current: unknown) => ({ current }),
     },
     "react/jsx-runtime": jsxRuntime,
     "lucide-react": {},
@@ -191,4 +192,105 @@ test("Letterboxd star labels read as numbers", () => {
   assert.equal(client.letterboxdStars("★★★½"), 3.5);
   assert.equal(client.letterboxdStars("½"), 0.5);
   assert.equal(client.letterboxdStars(null), null);
+});
+
+const filmPage = (...reviews: string[]) =>
+  new Response(
+    `<link rel="canonical" href="https://letterboxd.com/film/practical-magic/">${reviews.join("")}`,
+  );
+
+test("a later review page that is blocked keeps page one and fills in from the film page", async () => {
+  const requests: string[] = [];
+  const client = loadClient(async (url) => {
+    requests.push(url);
+    if (url.endsWith("/imdb/tt0120791/"))
+      return filmPage(review("a", "★★★★★", "Loved it"), review("z", "★★", "Film page only"));
+    if (url.endsWith("/by/added/")) return new Response(review("a", "★★★★★", "Loved it") + review("b", "★★★", "Fine"));
+    return new Response("<title>Just a moment...</title>", { status: 403 });
+  });
+  const result = await client.fetchLetterboxdReviewsDirect("tt0120791", 1, "newest");
+  assert.equal(result.source, "server");
+  assert.equal(result.partial, true);
+  assert.equal(result.sortUnavailable, false);
+  // Page one's order is kept, the film page adds what page one didn't have, nothing twice.
+  assert.deepEqual(
+    result.reviews.map((r) => r.author),
+    ["a", "b", "z"],
+  );
+  assert.equal(
+    requests.filter((u) => u.includes("/page/")).length,
+    1,
+    "no more pages after the blocked one",
+  );
+});
+
+test("a short last page ends the list without a fallback", async () => {
+  const requests: string[] = [];
+  const client = loadClient(async (url) => {
+    requests.push(url);
+    if (url.endsWith("/imdb/tt0120791/")) return filmPage();
+    if (url.endsWith("/by/activity/")) return new Response(review("a", "★★★★", "Only one"));
+    return new Response("<html><body>no reviews</body></html>");
+  });
+  const result = await client.fetchLetterboxdReviewsDirect("tt0120791", 1, "popular");
+  assert.equal(result.partial, false);
+  assert.deepEqual(
+    result.reviews.map((r) => r.author),
+    ["a"],
+  );
+  assert.equal(requests.filter((u) => u.endsWith("/imdb/tt0120791/")).length, 1);
+});
+
+test("'Most recent' says when it could not be applied, and a fully blocked film is empty", async () => {
+  const blocked = () => new Response("<title>Just a moment...</title>", { status: 403 });
+  const fallback = loadClient(async (url) =>
+    url.endsWith("/imdb/tt0120791/") ? filmPage(review("a", "★★★", "Fine")) : blocked(),
+  );
+  const newest = await fallback.fetchLetterboxdReviewsDirect("tt0120791", 1, "newest");
+  assert.equal(newest.source, "film-page");
+  assert.equal(newest.sortUnavailable, true);
+  const lowest = await fallback.fetchLetterboxdReviewsDirect("tt0120791", 1, "lowest");
+  assert.equal(lowest.sortUnavailable, false, "stars can be sorted here");
+
+  const none = loadClient(async () => blocked());
+  const empty = await none.fetchLetterboxdReviewsDirect("tt0120791", 1, "newest");
+  assert.deepEqual(empty.reviews, []);
+  assert.equal(empty.source, "none");
+});
+
+test("full text comes from the review body only, and only from Letterboxd full-text paths", () => {
+  const client = loadClient(async () => new Response(""));
+  const page = `<html><body><nav><p>Sign in</p><p>Films</p></nav>
+    <div class="review body-text -prose"><p>First paragraph.</p><p>Second paragraph.</p></div>
+    <footer><p>© Letterboxd</p></footer></body></html>`;
+  assert.equal(client.letterboxdFullText(page), "First paragraph.\n\nSecond paragraph.");
+  assert.equal(client.letterboxdFullText("<p>Just the</p><p>fragment.</p>"), "Just the\n\nfragment.");
+  assert.equal(
+    client.letterboxdFullText("<html><body><nav><p>Menu</p></nav><div>No body</div></body></html>"),
+    null,
+    "unknown shapes keep the cut text",
+  );
+
+  assert.equal(
+    client.letterboxdFullTextUrl("/s/full-text/viewing:416278186/"),
+    "https://letterboxd.com/s/full-text/viewing:416278186/",
+  );
+  assert.equal(client.letterboxdFullTextUrl("https://evil.example/s/full-text/viewing:1/"), null);
+  assert.equal(client.letterboxdFullTextUrl("//evil.example/s/full-text/viewing:1/"), null);
+  assert.equal(client.letterboxdFullTextUrl("/settings/"), null);
+  assert.equal(client.letterboxdFullTextUrl(null), null);
+});
+
+test("cut reviews load their full text from the review body", async () => {
+  const cut = `<article class="production-viewing"><a class="avatar" href="/a/"></a><span class="displayname">a</span><div class="js-review-body" lang="en" data-full-text-url="/s/full-text/viewing:1/"><p>The start of a long review…</p></div></article>`;
+  const client = loadClient(async (url) => {
+    if (url.endsWith("/imdb/tt0120791/")) return filmPage(cut);
+    if (url.includes("/s/full-text/"))
+      return new Response(
+        `<html><body><nav><p>Menu</p></nav><div class="body-text"><p>The start of a long review and the rest of it.</p></div></body></html>`,
+      );
+    return new Response("", { status: 403 });
+  });
+  const result = await client.fetchLetterboxdReviewsDirect("tt0120791", 1, "popular");
+  assert.equal(result.reviews[0]!.text, "The start of a long review and the rest of it.");
 });

@@ -91,9 +91,9 @@ export function EpisodeGridCard({
         onClick={() => g.play({ resume: partial })}
         onContextMenu={ctx}
         onFocus={() => prefetchSegments(cardMeta, { season: g.season, episode: g.number })}
-        className="flex w-full flex-col text-start"
+        className="flex w-full flex-col gap-2.5 text-start"
       >
-        <div className="relative aspect-video w-full overflow-hidden rounded-xl">
+        <div className="relative aspect-video overflow-hidden rounded-xl">
           <div className={thumbDim}>
             <Poster
               src={still}
@@ -126,16 +126,7 @@ export function EpisodeGridCard({
             </div>
           )}
         </div>
-      </button>
-      {/* Its own row so the reviews button sits beside the title without nesting buttons. */}
-      <div className="mt-2.5 flex items-start gap-1 px-0.5">
-        <button
-          type="button"
-          tabIndex={-1}
-          onClick={() => g.play({ resume: partial })}
-          onContextMenu={ctx}
-          className="flex min-w-0 flex-1 flex-col gap-0.5 text-start"
-        >
+        <div className={`flex flex-col gap-0.5 px-0.5 ${g.reviews ? "pe-8" : ""}`}>
           <span className="flex items-center gap-1.5">
             <span
               className={`line-clamp-2 text-[13.5px] font-semibold text-ink ${spoiler?.title ? SPOILER_TEXT_CLASS : ""}`}
@@ -158,11 +149,20 @@ export function EpisodeGridCard({
             </p>
           )}
           <EpisodeReleaseCountdown date={g.airDate} className="text-[11.5px]" />
-        </button>
-        {g.reviews && (
-          <EpisodeReviewsIconButton onClick={() => setReviewsOpen(true)} compact className="shrink-0" />
-        )}
-      </div>
+        </div>
+      </button>
+      {g.reviews && (
+        // Laid over the end of the title row, after the play button in focus order, so the card
+        // keeps its single play button and no button sits inside another.
+        <div className="pointer-events-none absolute inset-x-0 top-0 flex flex-col gap-2.5">
+          <div className="aspect-video" />
+          <div className="flex justify-end">
+            <span className="pointer-events-auto">
+              <EpisodeReviewsIconButton onClick={() => setReviewsOpen(true)} compact className="shrink-0" />
+            </span>
+          </div>
+        </div>
+      )}
       {preview && !spoilered && (
         <EpisodePreview
           meta={cardMeta}
@@ -189,7 +189,7 @@ export function EpisodeGridCard({
           season={g.reviews.season}
           episode={g.reviews.episode}
           episodeTitle={g.title}
-          showTitle={cardMeta.name}
+          showTitle={meta.name}
           onClose={() => setReviewsOpen(false)}
         />
       )}

@@ -157,7 +157,7 @@ test("both strip and grid information buttons pass the same playback payload as 
     "@/lib/providers/anime-episode-enrich": { unairedIndexes: () => new Set() },
     "./helpers": { isUpcomingDate: () => false },
     "./episode-rating-badge": { EpisodeRatingBadge: marker("rating") },
-    "./episode-reviews-dialog": { EpisodeReviewsButton: marker("reviews") },
+    "./anime-episodes/anime-reviews-button": { AnimeReviewsButton: marker("reviews") },
     "@/lib/episode-reviews": {
       episodeReviewsTarget: (imdbId, season, episode) =>
         imdbId && season != null && episode != null ? { imdbId, season, episode } : undefined,

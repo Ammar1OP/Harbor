@@ -16,4 +16,8 @@ export default {
   "Translate": "Çevir",
   "In {language}": "{language} dilinde",
   "No reviews in {language} here.": "Burada {language} dilinde inceleme yok.",
+  "{n} reviews couldn't be translated. Try again.": "{n} inceleme çevrilemedi. Tekrar deneyin.",
+  "Couldn't translate. Try again": "Çevrilemedi. Tekrar deneyin",
+  "Letterboxd didn't share review dates right now, so these are shown by popularity.": "Letterboxd şu anda inceleme tarihlerini vermiyor, bu yüzden popülerliğe göre gösteriliyor.",
+  "Reviewers' average: {rating}": "İnceleyenlerin ortalaması: {rating}",
 } as Record<string, string>;

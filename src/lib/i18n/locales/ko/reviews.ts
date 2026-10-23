@@ -16,4 +16,8 @@ export default {
   "Translate": "번역",
   "In {language}": "{language}만",
   "No reviews in {language} here.": "{language} 리뷰가 없습니다.",
+  "{n} reviews couldn't be translated. Try again.": "리뷰 {n}개를 번역하지 못했습니다. 다시 시도하세요.",
+  "Couldn't translate. Try again": "번역하지 못했습니다. 다시 시도",
+  "Letterboxd didn't share review dates right now, so these are shown by popularity.": "지금은 Letterboxd가 리뷰 날짜를 제공하지 않아 인기순으로 표시합니다.",
+  "Reviewers' average: {rating}": "리뷰어 평균: {rating}",
 } as Record<string, string>;

@@ -16,4 +16,8 @@ export default {
   "Translate": "翻译",
   "In {language}": "仅{language}",
   "No reviews in {language} here.": "这里没有{language}评论。",
+  "{n} reviews couldn't be translated. Try again.": "有 {n} 条评论未能翻译，请重试。",
+  "Couldn't translate. Try again": "翻译失败，重试",
+  "Letterboxd didn't share review dates right now, so these are shown by popularity.": "Letterboxd 暂未提供评论日期，因此按热度显示。",
+  "Reviewers' average: {rating}": "评论者平均分：{rating}",
 } as Record<string, string>;

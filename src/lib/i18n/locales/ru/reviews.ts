@@ -16,4 +16,8 @@ export default {
   "Translate": "Перевести",
   "In {language}": "На языке: {language}",
   "No reviews in {language} here.": "Здесь нет рецензий на языке: {language}.",
+  "{n} reviews couldn't be translated. Try again.": "Не удалось перевести рецензии: {n}. Попробуйте ещё раз.",
+  "Couldn't translate. Try again": "Не удалось перевести. Повторить",
+  "Letterboxd didn't share review dates right now, so these are shown by popularity.": "Letterboxd сейчас не отдаёт даты рецензий, поэтому они показаны по популярности.",
+  "Reviewers' average: {rating}": "Средняя оценка рецензентов: {rating}",
 } as Record<string, string>;

@@ -16,4 +16,8 @@ export default {
   "Translate": "Dịch",
   "In {language}": "Bằng {language}",
   "No reviews in {language} here.": "Không có đánh giá bằng {language} ở đây.",
+  "{n} reviews couldn't be translated. Try again.": "Không thể dịch {n} đánh giá. Hãy thử lại.",
+  "Couldn't translate. Try again": "Không thể dịch. Thử lại",
+  "Letterboxd didn't share review dates right now, so these are shown by popularity.": "Letterboxd hiện không cung cấp ngày đánh giá, nên chúng được sắp theo độ phổ biến.",
+  "Reviewers' average: {rating}": "Điểm trung bình của người đánh giá: {rating}",
 } as Record<string, string>;

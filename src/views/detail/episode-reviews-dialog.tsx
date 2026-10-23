@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { ExternalLink, Heart, Loader2, MessageSquareText, Star, X } from "lucide-react";
 import { HoverTooltip } from "@/components/hover-tooltip";
 import type { Meta } from "@/lib/cinemeta";
@@ -7,9 +7,10 @@ import { useT } from "@/lib/i18n";
 import { openUrl } from "@/lib/window";
 import {
   fetchEpisodeReviews,
+  reviewersAverage,
   sortEpisodeReviews,
   type EpisodeReview,
-  type EpisodeReviews,
+  type EpisodeReviewsCursor,
   type EpisodeReviewSort,
 } from "@/lib/episode-reviews";
 import {
@@ -28,6 +29,13 @@ const SORTS: { key: EpisodeReviewSort; label: string }[] = [
 ];
 
 const LONG_REVIEW = 700;
+/** Reviews shown at first and added by each "Show more". */
+export const REVIEWS_STEP = 25;
+
+/** The reviews "Translate all" covers: the ones on screen, minus spoilers still hidden. */
+export function bulkTranslationTexts(shown: EpisodeReview[]): string[] {
+  return shown.filter((r) => !r.spoiler).flatMap((r) => (r.title ? [r.title, r.text] : [r.text]));
+}
 
 export function EpisodeReviewsDialog({
   seriesImdbId,
@@ -47,20 +55,59 @@ export function EpisodeReviewsDialog({
   const t = useT();
   const titleId = useId();
   const { closing, close } = useModalExit(onClose);
-  const [data, setData] = useState<EpisodeReviews | null>(null);
+  const [loaded, setLoaded] = useState<EpisodeReview[] | null>(null);
+  const [next, setNext] = useState<EpisodeReviewsCursor | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(REVIEWS_STEP);
   const [sort, setSort] = useState<EpisodeReviewSort>("liked");
   const tr = useReviewTranslator();
+  const generation = useRef(0);
 
   useEffect(() => {
-    let live = true;
-    setData(null);
-    fetchEpisodeReviews(seriesImdbId, season, episode).then((d) => live && setData(d));
-    return () => {
-      live = false;
-    };
+    const id = ++generation.current;
+    setLoaded(null);
+    setNext(null);
+    setLoadingMore(false);
+    setVisibleCount(REVIEWS_STEP);
+    fetchEpisodeReviews(seriesImdbId, season, episode).then((page) => {
+      if (id !== generation.current) return;
+      setLoaded(page.reviews);
+      setNext(page.next);
+    });
+    return () => void ++generation.current;
   }, [seriesImdbId, season, episode]);
 
-  const reviews = useMemo(() => (data ? sortEpisodeReviews(data.reviews, sort) : []), [data, sort]);
+  const sorted = useMemo(() => (loaded ? sortEpisodeReviews(loaded, sort) : []), [loaded, sort]);
+  const shown = sorted.slice(0, visibleCount);
+  const average = useMemo(() => reviewersAverage(loaded ?? []), [loaded]);
+  const counts = useMemo(
+    () => ({
+      imdb: loaded?.filter((r) => r.source === "imdb").length ?? 0,
+      trakt: loaded?.filter((r) => r.source === "trakt").length ?? 0,
+    }),
+    [loaded],
+  );
+
+  // Shows the next step of reviews, reading the sources' next pages only when what is loaded
+  // runs out.
+  const showMore = async () => {
+    if (visibleCount < sorted.length || !next) {
+      setVisibleCount((n) => n + REVIEWS_STEP);
+      return;
+    }
+    const id = generation.current;
+    setLoadingMore(true);
+    const page = await fetchEpisodeReviews(seriesImdbId, season, episode, next);
+    if (id !== generation.current) return;
+    setLoaded((prev) => {
+      const seen = new Set((prev ?? []).map((r) => r.id));
+      return [...(prev ?? []), ...page.reviews.filter((r) => !seen.has(r.id))];
+    });
+    setNext(page.next);
+    setVisibleCount((n) => n + REVIEWS_STEP);
+    setLoadingMore(false);
+  };
+  const more = sorted.length > visibleCount || next != null;
 
   const subtitle = [showTitle, `S${season} E${episode}`, episodeTitle].filter(Boolean).join(" · ");
 
@@ -74,10 +121,13 @@ export function EpisodeReviewsDialog({
           <h2 id={titleId} className="text-[17px] font-semibold tracking-tight text-ink">
             {t("Episode reviews")}
           </h2>
-          {data && (
+          {loaded && (
             <span className="text-[12px] text-ink-subtle">
-              IMDb {data.imdbCount} · Trakt {data.traktCount}
-              {data.average != null && ` · ★ ${data.average.toFixed(1)}/10`}
+              IMDb {counts.imdb}
+              {next?.imdb != null ? "+" : ""} · Trakt {counts.trakt}
+              {next?.trakt != null ? "+" : ""}
+              {average != null &&
+                ` · ${t("Reviewers' average: {rating}", { rating: `★ ${average.toFixed(1)}/10` })}`}
             </span>
           )}
         </div>
@@ -110,28 +160,36 @@ export function EpisodeReviewsDialog({
           ))}
         </div>
         <div className="ms-auto">
-          <ReviewTranslateBar
-            tr={tr}
-            texts={reviews.flatMap((r) => (r.title ? [r.title, r.text] : [r.text]))}
-          />
+          <ReviewTranslateBar tr={tr} texts={bulkTranslationTexts(shown)} />
         </div>
       </div>
 
       <div className="flex min-h-[240px] flex-1 flex-col gap-3 overflow-y-auto px-6 pb-6">
-        {!data && (
+        {!loaded && (
           <p className="flex items-center justify-center gap-2 py-16 text-[13px] text-ink-muted">
             <Loader2 size={14} className="animate-spin" />
             {t("Gathering reviews from IMDb and Trakt…")}
           </p>
         )}
-        {data && reviews.length === 0 && (
+        {loaded && sorted.length === 0 && (
           <p className="py-16 text-center text-[14px] text-ink-muted">
             {t("No reviews for this episode yet.")}
           </p>
         )}
-        {reviews.map((r) => (
+        {shown.map((r) => (
           <ReviewCard key={r.id} review={r} tr={tr} />
         ))}
+        {loaded && more && (
+          <button
+            type="button"
+            onClick={() => void showMore()}
+            disabled={loadingMore}
+            className="flex h-10 shrink-0 items-center justify-center gap-2 rounded-xl bg-white/[0.06] text-[13px] font-semibold text-ink-muted transition-colors hover:bg-white/[0.10] hover:text-ink disabled:opacity-60"
+          >
+            {loadingMore && <Loader2 size={14} className="animate-spin" />}
+            {t("Show more")}
+          </button>
+        )}
       </div>
     </ModalShell>
   );

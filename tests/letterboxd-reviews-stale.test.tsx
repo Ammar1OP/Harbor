@@ -21,8 +21,25 @@ function deferred() {
   return { promise, resolve };
 }
 
+const emptyAnswer: Result = {
+  reviews: [],
+  hasNext: false,
+  source: "none",
+  partial: false,
+  sortUnavailable: false,
+};
+
 const answer = (author: string): Result => ({
-  reviews: [{ text: `${author} review`, author, url: "", lang: "en", rating: null, date: null }],
+  reviews: [
+    {
+      text: `${author} review`,
+      author,
+      url: `https://letterboxd.com/film/${author.replace(/\s+/g, "-")}/reviews/`,
+      lang: "en",
+      rating: null,
+      date: null,
+    },
+  ],
   hasNext: false,
   source: "server",
   partial: false,
@@ -114,9 +131,15 @@ test("a slow answer for an earlier request never replaces the latest one's revie
   assert.ok(!text().includes("newest review"), "the older sort's late answer was dropped");
   assert.ok(!text().includes("Loading…"), "the late answer did not leave a spinner behind");
 
+  // Film-scoped links are cleared immediately. Film three returns no reviews while Longest is
+  // selected, so an old "All reviews" link from film two must not survive the switch.
+  await show("tt3");
+  await React.act(async () => pending.get("tt3:longest")!.resolve(emptyAnswer));
+  assert.equal(chip("All reviews"), undefined, "the previous film's Letterboxd link was cleared");
+
   // Unmounting retires anything still in flight.
   await React.act(async () => chip("Lowest rated")!.click());
   await React.act(async () => root.unmount());
-  await React.act(async () => pending.get("tt2:lowest")!.resolve(answer("lowest")));
+  await React.act(async () => pending.get("tt3:lowest")!.resolve(answer("lowest")));
   assert.ok(!text().includes("lowest review"));
 });

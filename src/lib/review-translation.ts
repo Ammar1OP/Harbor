@@ -30,6 +30,23 @@ const languageName = Object.fromEntries(
 // Insertion-ordered, so the oldest entry is the first key: a small LRU.
 const cache = new Map<string, string>();
 const inFlight = new Map<string, Promise<string | null>>();
+
+// A process-wide gate, not one pool per translateReviews() call. Individual review buttons,
+// Translate all, and other review sections can overlap, but Google still sees at most four
+// requests from Harbor at once.
+let googleActive = 0;
+const googleWaiters: Array<() => void> = [];
+async function withGoogleSlot<T>(task: () => Promise<T>): Promise<T> {
+  if (googleActive < GOOGLE_CONCURRENCY) googleActive++;
+  else await new Promise<void>((resolve) => googleWaiters.push(resolve));
+  try {
+    return await task();
+  } finally {
+    const next = googleWaiters.shift();
+    if (next) next();
+    else googleActive--;
+  }
+}
 const cacheKey = (text: string, to: UiLanguage) => `${to}\u0000${text}`;
 
 export function cachedReviewTranslation(text: string, to: UiLanguage): string | null {
@@ -51,14 +68,23 @@ function remember(text: string, to: UiLanguage, translated: string): void {
 export type Chunk = { text: string; glue: string };
 
 const encodedLength = (text: string) => encodeURIComponent(text).length;
-const SENTENCE_END = /[.!?…。！？؟]["'”’)\]」』]*\s*$/u;
+const SENTENCE_END = /[.!?…。！？؟]["'”’)\]」』]*$/u;
+
+const graphemes = (text: string): string[] => {
+  if (typeof Intl.Segmenter === "function") {
+    const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+    return Array.from(segmenter.segment(text), ({ segment }) => segment);
+  }
+  // Older WebViews still avoid splitting surrogate pairs; modern ones take the grapheme path.
+  return Array.from(text);
+};
 
 // Cuts a paragraph that is over the budget into pieces that fit: at a sentence end, else at a
-// space, else between characters. Works on code points, so emoji and surrogate pairs stay whole.
+// space, else between grapheme clusters. This keeps ZWJ emoji and combining sequences intact.
 // `glue` is the whitespace the piece was cut at, to put the pieces back together.
 function splitParagraph(paragraph: string, budget: number): Chunk[] {
   const out: Chunk[] = [];
-  let rest = Array.from(paragraph);
+  let rest = graphemes(paragraph);
   let glue = "";
   while (encodedLength(rest.join("")) > budget) {
     // The longest prefix that fits.
@@ -72,8 +98,10 @@ function splitParagraph(paragraph: string, budget: number): Chunk[] {
     const fit = lo;
     let cut = fit;
     // Prefer the last sentence end, then the last space, in the second half of what fits.
+    // CJK sentences normally have no whitespace after 。！？, so sentence punctuation itself is
+    // sufficient to establish a boundary.
     for (let i = fit; i > fit / 2; i--) {
-      if (/\s/u.test(rest[i] ?? "") && SENTENCE_END.test(rest.slice(0, i).join(""))) {
+      if (SENTENCE_END.test(rest.slice(0, i).join(""))) {
         cut = i;
         break;
       }
@@ -130,7 +158,7 @@ type GoogleResult = { ok: true; text: string } | { ok: false; tooLong: boolean }
 async function googleRequest(text: string, target: string): Promise<GoogleResult> {
   const params = new URLSearchParams({ client: "gtx", sl: "auto", tl: target, dt: "t", q: text });
   for (let attempt = 0; ; attempt++) {
-    const res = await safeFetch(`${GOOGLE_URL}?${params}`).catch(() => null);
+    const res = await withGoogleSlot(() => safeFetch(`${GOOGLE_URL}?${params}`)).catch(() => null);
     if (res?.ok) {
       const data = (await res.json().catch(() => null)) as [Array<[string]>] | null;
       if (!Array.isArray(data?.[0])) return { ok: false, tooLong: false };

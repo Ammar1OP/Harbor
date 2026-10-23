@@ -211,7 +211,11 @@ test("a later review page that is blocked keeps page one and fills in from the f
   const result = await client.fetchLetterboxdReviewsDirect("tt0120791", 1, "newest");
   assert.equal(result.source, "server");
   assert.equal(result.partial, true);
-  assert.equal(result.sortUnavailable, false);
+  assert.equal(
+    result.sortUnavailable,
+    true,
+    "film-page additions have no dates, so the combined newest order is not reliable",
+  );
   // Page one's order is kept, the film page adds what page one didn't have, nothing twice.
   assert.deepEqual(
     result.reviews.map((r) => r.author),

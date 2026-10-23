@@ -28,7 +28,7 @@ export type ReviewTranslator = {
   isFailed: (text: string) => boolean;
   /** Shows or hides the translation of a review; `extra` (its title) follows the review. */
   toggle: (text: string, extra?: string[]) => void;
-  translateAll: (texts: string[]) => void;
+  translateAll: (texts: string[], failureGroups?: string[][]) => void;
   busyAll: boolean;
   /** How many reviews the last "Translate all" could not translate. */
   failedAll: number;
@@ -52,9 +52,9 @@ export function useReviewTranslator(): ReviewTranslator {
 
   const slot = useCallback((text: string) => `${target}\u0000${text}`, [target]);
 
-  /** Translates the texts and shows them; resolves to how many could not be translated. */
+  /** Translates the texts and shows them; resolves to the strings that could not be translated. */
   const run = useCallback(
-    async (texts: string[]): Promise<number> => {
+    async (texts: string[]): Promise<string[]> => {
       const pending = texts.filter((text) => text.trim() && !translated[slot(text)]);
       let failures: string[] = [];
       if (pending.length) {
@@ -86,7 +86,7 @@ export function useReviewTranslator(): ReviewTranslator {
         });
       }
       setShown((prev) => new Set([...prev, ...texts.map(slot)]));
-      return failures.length;
+      return failures;
     },
     [ai, slot, target, translated],
   );
@@ -115,12 +115,19 @@ export function useReviewTranslator(): ReviewTranslator {
         });
       } else void run(texts);
     },
-    translateAll: (texts) => {
+    translateAll: (texts, failureGroups) => {
       if (busyAll) return;
       setBusyAll(true);
       setFailedAll(0);
       void run(texts)
-        .then(setFailedAll)
+        .then((failures) => {
+          if (!failureGroups) {
+            setFailedAll(failures.length);
+            return;
+          }
+          const failed = new Set(failures);
+          setFailedAll(failureGroups.filter((group) => group.some((text) => failed.has(text))).length);
+        })
         .finally(() => setBusyAll(false));
     },
     busyAll,
@@ -129,7 +136,15 @@ export function useReviewTranslator(): ReviewTranslator {
 }
 
 /** Target language picker and "Translate all" for a list of reviews. */
-export function ReviewTranslateBar({ tr, texts }: { tr: ReviewTranslator; texts: string[] }) {
+export function ReviewTranslateBar({
+  tr,
+  texts,
+  failureGroups,
+}: {
+  tr: ReviewTranslator;
+  texts: string[];
+  failureGroups?: string[][];
+}) {
   const t = useT();
   if (!texts.length) return null;
   return (
@@ -153,7 +168,7 @@ export function ReviewTranslateBar({ tr, texts }: { tr: ReviewTranslator; texts:
       </select>
       <button
         type="button"
-        onClick={() => tr.translateAll(texts)}
+        onClick={() => tr.translateAll(texts, failureGroups)}
         disabled={tr.busyAll}
         className="flex h-7 items-center gap-1.5 rounded-full bg-amber-300/15 px-3 text-[12px] font-semibold text-amber-300 transition-colors hover:bg-amber-300/25 disabled:opacity-60"
       >

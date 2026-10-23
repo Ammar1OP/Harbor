@@ -466,7 +466,9 @@ export async function fetchLetterboxdReviewsDirect(
     hasNext: false,
     source,
     partial: fromServer && pageFailed,
-    sortUnavailable: sortBy === "newest" && !fromServer,
+    // A blocked later page means film-page reviews may be appended without dates, so the
+    // combined newest order is no longer reliable even when page one came from the server.
+    sortUnavailable: sortBy === "newest" && pageFailed,
   };
 }
 

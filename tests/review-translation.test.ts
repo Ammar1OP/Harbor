@@ -149,6 +149,40 @@ test("Google requests run at most four at a time", async () => {
   assert.ok(peak <= 4, `peak ${peak}`);
 });
 
+test("simultaneous translation calls share the four-request Google limit", async () => {
+  let running = 0;
+  let peak = 0;
+  const { translateReviews } = loadTranslation(async (url) => {
+    running++;
+    peak = Math.max(peak, running);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    running--;
+    const q = new URL(url).searchParams.get("q");
+    return new Response(JSON.stringify([[[`ar:${q}`, q]]]));
+  });
+  await Promise.all([
+    translateReviews(["a1", "a2", "a3", "a4"], "ar", null),
+    translateReviews(["b1", "b2", "b3", "b4"], "ar", null),
+  ]);
+  assert.ok(peak <= 4, `peak ${peak}`);
+});
+
+test("CJK sentence boundaries and ZWJ emoji stay intact when chunking", () => {
+  const { translationChunks } = loadTranslation(async () => new Response(""));
+  const cjk = "第一句很好。第二句也很好！第三句仍然很好？".repeat(12);
+  const cjkChunks = translationChunks(cjk, 120);
+  assert.equal(rejoin(cjkChunks), cjk);
+  assert.ok(cjkChunks.slice(0, -1).every((chunk) => /[。！？]$/u.test(chunk.text)));
+
+  const family = "👨‍👩‍👧";
+  const emoji = family.repeat(12);
+  const budget = encodeURIComponent(family.repeat(2)).length;
+  const emojiChunks = translationChunks(emoji, budget);
+  assert.equal(rejoin(emojiChunks), emoji);
+  assert.ok(emojiChunks.every((chunk) => chunk.text.replaceAll(family, "") === ""));
+  assert.ok(emojiChunks.every((chunk) => !chunk.text.startsWith("‍") && !chunk.text.endsWith("‍")));
+});
+
 test("partial failures leave only the failed reviews null", async () => {
   const g = google((q) => (q.includes("bad") ? new Response("", { status: 403 }) : undefined!));
   const { translateReviews } = loadTranslation(g.fetch);

@@ -203,7 +203,8 @@ test("episode reviews load a page at a time and say where the next page starts",
 
 test("'Translate all' covers the reviews on screen, minus spoilers still hidden", () => {
   const icon = () => null;
-  const { bulkTranslationTexts, REVIEWS_STEP } = load<{
+  const { bulkTranslationGroups, bulkTranslationTexts, REVIEWS_STEP } = load<{
+    bulkTranslationGroups: (reviews: unknown[]) => string[][];
     bulkTranslationTexts: (reviews: unknown[]) => string[];
     REVIEWS_STEP: number;
   }>("src/views/detail/episode-reviews-dialog.tsx", {
@@ -218,14 +219,13 @@ test("'Translate all' covers the reviews on screen, minus spoilers still hidden"
     "./review-translation": {},
   });
   assert.ok(REVIEWS_STEP >= 20 && REVIEWS_STEP <= 30);
-  assert.deepEqual(
-    bulkTranslationTexts([
-      { title: "Title", text: "Body", spoiler: false },
-      { title: "", text: "Plain", spoiler: false },
-      { title: "Spoiler title", text: "Spoiler body", spoiler: true },
-    ]),
-    ["Title", "Body", "Plain"],
-  );
+  const reviews = [
+    { title: "Title", text: "Body", spoiler: false },
+    { title: "", text: "Plain", spoiler: false },
+    { title: "Spoiler title", text: "Spoiler body", spoiler: true },
+  ];
+  assert.deepEqual(bulkTranslationGroups(reviews), [["Title", "Body"], ["Plain"]]);
+  assert.deepEqual(bulkTranslationTexts(reviews), ["Title", "Body", "Plain"]);
 });
 
 function loadGridCard(onReviews: () => void = () => {}) {

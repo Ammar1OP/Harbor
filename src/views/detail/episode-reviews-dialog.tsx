@@ -33,8 +33,12 @@ const LONG_REVIEW = 700;
 export const REVIEWS_STEP = 25;
 
 /** The reviews "Translate all" covers: the ones on screen, minus spoilers still hidden. */
+export function bulkTranslationGroups(shown: EpisodeReview[]): string[][] {
+  return shown.filter((r) => !r.spoiler).map((r) => (r.title ? [r.title, r.text] : [r.text]));
+}
+
 export function bulkTranslationTexts(shown: EpisodeReview[]): string[] {
-  return shown.filter((r) => !r.spoiler).flatMap((r) => (r.title ? [r.title, r.text] : [r.text]));
+  return bulkTranslationGroups(shown).flat();
 }
 
 export function EpisodeReviewsDialog({
@@ -79,6 +83,7 @@ export function EpisodeReviewsDialog({
 
   const sorted = useMemo(() => (loaded ? sortEpisodeReviews(loaded, sort) : []), [loaded, sort]);
   const shown = sorted.slice(0, visibleCount);
+  const translationGroups = bulkTranslationGroups(shown);
   const average = useMemo(() => reviewersAverage(loaded ?? []), [loaded]);
   const counts = useMemo(
     () => ({
@@ -160,7 +165,11 @@ export function EpisodeReviewsDialog({
           ))}
         </div>
         <div className="ms-auto">
-          <ReviewTranslateBar tr={tr} texts={bulkTranslationTexts(shown)} />
+          <ReviewTranslateBar
+            tr={tr}
+            texts={translationGroups.flat()}
+            failureGroups={translationGroups}
+          />
         </div>
       </div>
 

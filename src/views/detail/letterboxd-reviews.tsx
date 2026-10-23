@@ -90,6 +90,11 @@ function LetterboxdReviewsInner({ meta, imdbId }: { meta: Meta; imdbId: string |
     }
     setLoading(true);
     setReviews([]);
+    // These belong to the previous film/request generation. Clear them before awaiting anything
+    // so a failed or slow next request cannot leave an old Letterboxd link or friends list behind.
+    setFilmSlug(null);
+    setFriendsReviews([]);
+    setLoadingFriends(false);
     setShowAll(false);
     setSortUnavailable(false);
     try {

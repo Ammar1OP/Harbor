@@ -18,6 +18,7 @@ export default {
   "No reviews in {language} here.": "{language}のレビューはありません。",
   "{n} reviews couldn't be translated. Try again.": "{n} 件のレビューを翻訳できませんでした。もう一度お試しください。",
   "Couldn't translate. Try again": "翻訳できませんでした。再試行",
+  "Some recent reviews couldn't be loaded, so fallback reviews are shown after the newest results.": "一部の最新レビューを読み込めなかったため、代替レビューは最新結果の後に表示されます。",
   "Letterboxd didn't share review dates right now, so these are shown by popularity.": "Letterboxd が現在レビューの日付を提供していないため、人気順で表示しています。",
   "Reviewers' average: {rating}": "レビュアーの平均: {rating}",
 } as Record<string, string>;

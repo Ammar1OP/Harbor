@@ -1,5 +1,5 @@
 import { safeFetch } from "@/lib/safe-fetch";
-import { fetchComments } from "@/lib/trakt/comments";
+import { fetchCommentsStrict } from "@/lib/trakt/comments";
 
 // Reviews for a single episode, merged from two public sources:
 //  - IMDb user reviews of the episode itself (each with the reviewer's /10 rating), read from
@@ -37,8 +37,10 @@ export type EpisodeReviewsCursor = {
 
 export type EpisodeReviewsPage = {
   reviews: EpisodeReview[];
-  /** Null when both sources are exhausted. */
+  /** Null when both sources are exhausted. Failed sources keep their cursor so retry is possible. */
   next: EpisodeReviewsCursor | null;
+  /** Sources whose current page could not be read. */
+  failed: EpisodeReviewSource[];
 };
 
 const IMDB_GRAPHQL = "https://api.graphql.imdb.com/";
@@ -47,7 +49,9 @@ const TRAKT_PAGE = 25;
 const IMDB_EPISODE_PAGE = 250;
 const IMDB_EPISODE_PAGES = 8;
 
-async function imdbQuery<T>(query: string): Promise<T | null> {
+type ImdbQueryResult<T> = { data: T | null; failed: boolean };
+
+async function imdbQueryResult<T>(query: string): Promise<ImdbQueryResult<T>> {
   try {
     const res = await safeFetch(IMDB_GRAPHQL, {
       method: "POST",
@@ -57,10 +61,11 @@ async function imdbQuery<T>(query: string): Promise<T | null> {
       },
       body: JSON.stringify({ query }),
     });
-    if (!res.ok) return null;
-    return ((await res.json()) as { data?: T }).data ?? null;
+    if (!res.ok) return { data: null, failed: true };
+    const body = (await res.json()) as { data?: T; errors?: unknown[] };
+    return { data: body.data ?? null, failed: body.data == null };
   } catch {
-    return null;
+    return { data: null, failed: true };
   }
 }
 
@@ -86,15 +91,17 @@ export function episodeReviewsTarget(
 const seasonEpisodes = new Map<string, Map<string, string>>();
 
 /** IMDb id of an episode, from the series' IMDb id. Follows the season list's pages. */
-export async function imdbEpisodeId(
+type ImdbEpisodeLookup = { id: string | null; failed: boolean };
+
+async function imdbEpisodeLookup(
   seriesImdbId: string,
   season: number,
   episode: number,
-): Promise<string | null> {
-  if (!episodeReviewsTarget(seriesImdbId, season, episode)) return null;
+): Promise<ImdbEpisodeLookup> {
+  if (!episodeReviewsTarget(seriesImdbId, season, episode)) return { id: null, failed: false };
   const key = `${seriesImdbId}:${season}`;
   const cached = seasonEpisodes.get(key);
-  if (cached) return cached.get(String(episode)) ?? null;
+  if (cached) return { id: cached.get(String(episode)) ?? null, failed: false };
   type Data = {
     title?: {
       episodes?: {
@@ -113,11 +120,12 @@ export async function imdbEpisodeId(
   const byNumber = new Map<string, string>();
   let after = "";
   for (let page = 0; page < IMDB_EPISODE_PAGES; page++) {
-    const data = await imdbQuery<Data>(
+    const result = await imdbQueryResult<Data>(
       `{ title(id:"${seriesImdbId}"){ episodes{ episodes(first:${IMDB_EPISODE_PAGE}${after ? `, after:"${after}"` : ""}, filter:{includeSeasons:["${season}"]}){ pageInfo{hasNextPage endCursor} edges{ node{ id series{ displayableEpisodeNumber{ episodeNumber{text} } } } } } } } }`,
     );
-    const list = data?.title?.episodes?.episodes;
-    if (!list) return null;
+    if (result.failed) return { id: null, failed: true };
+    const list = result.data?.title?.episodes?.episodes;
+    if (!list) return { id: null, failed: false };
     for (const { node } of list.edges) {
       const n = node.series?.displayableEpisodeNumber?.episodeNumber?.text;
       if (n && IMDB_ID.test(node.id)) byNumber.set(n, node.id);
@@ -126,13 +134,22 @@ export async function imdbEpisodeId(
     const cursor = list.pageInfo?.endCursor ?? "";
     if (!list.pageInfo?.hasNextPage || !cursor || !validCursor(cursor)) {
       if (byNumber.size) seasonEpisodes.set(key, byNumber);
-      return found ?? null;
+      return { id: found ?? null, failed: false };
     }
     // Found before the end: answer now, but don't cache a season we haven't read to the end.
-    if (found) return found;
+    if (found) return { id: found, failed: false };
     after = cursor;
   }
-  return byNumber.get(String(episode)) ?? null;
+  return { id: byNumber.get(String(episode)) ?? null, failed: false };
+}
+
+/** IMDb id of an episode, from the series' IMDb id. Follows the season list's pages. */
+export async function imdbEpisodeId(
+  seriesImdbId: string,
+  season: number,
+  episode: number,
+): Promise<string | null> {
+  return (await imdbEpisodeLookup(seriesImdbId, season, episode)).id;
 }
 
 type ImdbReviewNode = {
@@ -146,11 +163,33 @@ type ImdbReviewNode = {
   spoiler?: boolean;
 };
 
+const IMDB_REVIEW_SORT: Record<
+  EpisodeReviewSort,
+  { by: "HELPFULNESS_SCORE" | "SUBMISSION_DATE" | "USER_RATING"; order: "ASC" | "DESC" }
+> = {
+  liked: { by: "HELPFULNESS_SCORE", order: "DESC" },
+  recent: { by: "SUBMISSION_DATE", order: "DESC" },
+  highest: { by: "USER_RATING", order: "DESC" },
+  lowest: { by: "USER_RATING", order: "ASC" },
+  // Neither source exposes a length sort. The dialog exhausts both sources for this mode.
+  longest: { by: "HELPFULNESS_SCORE", order: "DESC" },
+};
+
+const TRAKT_REVIEW_SORT: Record<EpisodeReviewSort, string> = {
+  liked: "likes",
+  recent: "newest",
+  highest: "highest",
+  lowest: "lowest",
+  longest: "likes",
+};
+
 async function imdbReviewsPage(
   episodeImdbId: string,
   after: string,
-): Promise<{ reviews: EpisodeReview[]; next: string | null }> {
-  if (!IMDB_ID.test(episodeImdbId) || !validCursor(after)) return { reviews: [], next: null };
+  sort: EpisodeReviewSort,
+): Promise<{ reviews: EpisodeReview[]; next: string | null; failed: boolean }> {
+  if (!IMDB_ID.test(episodeImdbId) || !validCursor(after))
+    return { reviews: [], next: null, failed: false };
   type Data = {
     title?: {
       reviews?: {
@@ -159,11 +198,13 @@ async function imdbReviewsPage(
       };
     };
   };
-  const data = await imdbQuery<Data>(
-    `{ title(id:"${episodeImdbId}"){ reviews(first:${IMDB_PAGE}${after ? `, after:"${after}"` : ""}, sort:{by:HELPFULNESS_SCORE, order:DESC}){ pageInfo{hasNextPage endCursor} edges{ node{ id author{nickName} authorRating summary{originalText} text{originalText{plainText}} submissionDate helpfulness{upVotes} spoiler } } } } }`,
+  const order = IMDB_REVIEW_SORT[sort];
+  const result = await imdbQueryResult<Data>(
+    `{ title(id:"${episodeImdbId}"){ reviews(first:${IMDB_PAGE}${after ? `, after:"${after}"` : ""}, sort:{by:${order.by}, order:${order.order}}){ pageInfo{hasNextPage endCursor} edges{ node{ id author{nickName} authorRating summary{originalText} text{originalText{plainText}} submissionDate helpfulness{upVotes} spoiler } } } } }`,
   );
-  const list = data?.title?.reviews;
-  if (!list) return { reviews: [], next: null };
+  if (result.failed) return { reviews: [], next: after, failed: true };
+  const list = result.data?.title?.reviews;
+  if (!list) return { reviews: [], next: null, failed: false };
   const reviews = list.edges.map(({ node }): EpisodeReview => ({
     id: `imdb:${node.id}`,
     source: "imdb",
@@ -178,7 +219,7 @@ async function imdbReviewsPage(
     url: `https://www.imdb.com/review/${node.id}/`,
   }));
   const cursor = list.pageInfo?.endCursor ?? "";
-  return { reviews, next: list.pageInfo?.hasNextPage && cursor ? cursor : null };
+  return { reviews, next: list.pageInfo?.hasNextPage && cursor ? cursor : null, failed: false };
 }
 
 async function traktCommentsPage(
@@ -186,28 +227,33 @@ async function traktCommentsPage(
   season: number,
   episode: number,
   page: number,
-): Promise<{ reviews: EpisodeReview[]; next: number | null }> {
+  sort: EpisodeReviewSort,
+): Promise<{ reviews: EpisodeReview[]; next: number | null; failed: boolean }> {
   const target = {
     kind: "episode" as const,
     show: { ids: { imdb: seriesImdbId } },
     season,
     number: episode,
   };
-  const comments = await fetchComments(target, "likes", page, TRAKT_PAGE);
-  const reviews = comments.map((c): EpisodeReview => ({
-    id: `trakt:${c.id}`,
-    source: "trakt",
-    author: c.user.name || c.user.username,
-    avatar: c.user.avatar,
-    rating: c.userRating,
-    date: c.createdAt,
-    likes: c.likes,
-    title: "",
-    text: c.comment,
-    spoiler: c.spoiler,
-    url: `https://trakt.tv/comments/${c.id}`,
-  }));
-  return { reviews, next: comments.length < TRAKT_PAGE ? null : page + 1 };
+  try {
+    const comments = await fetchCommentsStrict(target, TRAKT_REVIEW_SORT[sort], page, TRAKT_PAGE);
+    const reviews = comments.map((c): EpisodeReview => ({
+      id: `trakt:${c.id}`,
+      source: "trakt",
+      author: c.user.name || c.user.username,
+      avatar: c.user.avatar,
+      rating: c.userRating,
+      date: c.createdAt,
+      likes: c.likes,
+      title: "",
+      text: c.comment,
+      spoiler: c.spoiler,
+      url: `https://trakt.tv/comments/${c.id}`,
+    }));
+    return { reviews, next: comments.length < TRAKT_PAGE ? null : page + 1, failed: false };
+  } catch {
+    return { reviews: [], next: page, failed: true };
+  }
 }
 
 const FIRST_PAGE: EpisodeReviewsCursor = { imdb: "", trakt: 1 };
@@ -222,28 +268,36 @@ export async function fetchEpisodeReviews(
   episode: number,
   cursor: EpisodeReviewsCursor = FIRST_PAGE,
   episodeImdbId?: string | null,
+  sort: EpisodeReviewSort = "liked",
 ): Promise<EpisodeReviewsPage> {
-  if (!episodeReviewsTarget(seriesImdbId, season, episode)) return { reviews: [], next: null };
+  if (!episodeReviewsTarget(seriesImdbId, season, episode))
+    return { reviews: [], next: null, failed: [] };
+
+  const imdbPromise = async (): Promise<{ reviews: EpisodeReview[]; next: string | null; failed: boolean }> => {
+    if (cursor.imdb == null) return { reviews: [], next: null, failed: false };
+    if (episodeImdbId && IMDB_ID.test(episodeImdbId))
+      return imdbReviewsPage(episodeImdbId, cursor.imdb, sort);
+    const lookup = await imdbEpisodeLookup(seriesImdbId, season, episode);
+    if (lookup.failed) return { reviews: [], next: cursor.imdb, failed: true };
+    if (!lookup.id) return { reviews: [], next: null, failed: false };
+    return imdbReviewsPage(lookup.id, cursor.imdb, sort);
+  };
+
   const [imdb, trakt] = await Promise.all([
-    cursor.imdb == null
-      ? { reviews: [], next: null }
-      : (episodeImdbId && IMDB_ID.test(episodeImdbId)
-          ? Promise.resolve(episodeImdbId)
-          : imdbEpisodeId(seriesImdbId, season, episode)
-        )
-          .then((id) => (id ? imdbReviewsPage(id, cursor.imdb!) : { reviews: [], next: null }))
-          .catch(() => ({ reviews: [], next: null })),
+    imdbPromise(),
     cursor.trakt == null
-      ? { reviews: [], next: null }
-      : traktCommentsPage(seriesImdbId, season, episode, cursor.trakt).catch(() => ({
-          reviews: [],
-          next: null,
-        })),
+      ? Promise.resolve({ reviews: [], next: null, failed: false })
+      : traktCommentsPage(seriesImdbId, season, episode, cursor.trakt, sort),
   ]);
   const next = { imdb: imdb.next, trakt: trakt.next };
+  const failed: EpisodeReviewSource[] = [
+    ...(imdb.failed ? (["imdb"] as const) : []),
+    ...(trakt.failed ? (["trakt"] as const) : []),
+  ];
   return {
     reviews: [...imdb.reviews, ...trakt.reviews].filter((r) => r.text.trim()),
     next: next.imdb == null && next.trakt == null ? null : next,
+    failed,
   };
 }
 

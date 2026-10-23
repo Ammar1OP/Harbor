@@ -73,6 +73,7 @@ function LetterboxdReviewsInner({ meta, imdbId }: { meta: Meta; imdbId: string |
   const [sort, setSort] = useState<LetterboxdReviewSort>("popular");
   const [ownLanguage, setOwnLanguage] = useState(false);
   const [sortUnavailable, setSortUnavailable] = useState(false);
+  const [partial, setPartial] = useState(false);
   // Each fetch takes a number; only the latest may update the section, so a slow answer for an
   // earlier sort (or film) never replaces a newer one.
   const generation = useRef(0);
@@ -97,11 +98,13 @@ function LetterboxdReviewsInner({ meta, imdbId }: { meta: Meta; imdbId: string |
     setLoadingFriends(false);
     setShowAll(false);
     setSortUnavailable(false);
+    setPartial(false);
     try {
       const result = await fetchLetterboxdReviewsDirect(effectiveImdbId, 1, sort);
       if (!current()) return;
       setReviews(result.reviews);
       setSortUnavailable(result.sortUnavailable);
+      setPartial(result.partial);
       if (result.reviews[0]?.url) {
         const m = result.reviews[0].url.match(/letterboxd\.com\/film\/([^/]+)/);
         if (m) setFilmSlug(m[1]!);
@@ -293,7 +296,11 @@ function LetterboxdReviewsInner({ meta, imdbId }: { meta: Meta; imdbId: string |
 
       {sortUnavailable && filter === "all" && !loading && (
         <p role="status" className="mb-3 text-[12px] text-ink-subtle">
-          {t("Letterboxd didn't share review dates right now, so these are shown by popularity.")}
+          {t(
+            partial
+              ? "Some recent reviews couldn't be loaded, so fallback reviews are shown after the newest results."
+              : "Letterboxd didn't share review dates right now, so these are shown by popularity.",
+          )}
         </p>
       )}
 

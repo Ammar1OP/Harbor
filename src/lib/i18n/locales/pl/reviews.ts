@@ -18,6 +18,7 @@ export default {
   "No reviews in {language} here.": "Brak recenzji w języku {language}.",
   "{n} reviews couldn't be translated. Try again.": "Nie udało się przetłumaczyć recenzji: {n}. Spróbuj ponownie.",
   "Couldn't translate. Try again": "Nie udało się przetłumaczyć. Spróbuj ponownie",
+  "Some recent reviews couldn't be loaded, so fallback reviews are shown after the newest results.": "Nie udało się wczytać części najnowszych recenzji, dlatego recenzje zapasowe są wyświetlane po najnowszych wynikach.",
   "Letterboxd didn't share review dates right now, so these are shown by popularity.": "Letterboxd nie podaje teraz dat recenzji, więc są posortowane według popularności.",
   "Reviewers' average: {rating}": "Średnia recenzentów: {rating}",
 } as Record<string, string>;

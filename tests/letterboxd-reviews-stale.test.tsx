@@ -143,3 +143,9 @@ test("a slow answer for an earlier request never replaces the latest one's revie
   await React.act(async () => pending.get("tt3:lowest")!.resolve(answer("lowest")));
   assert.ok(!text().includes("lowest review"));
 });
+
+test("partial newest results use wording that does not claim the whole list is popular", () => {
+  const source = readFileSync("src/views/detail/letterboxd-reviews.tsx", "utf8");
+  assert.match(source, /partial\s*\?\s*"Some recent reviews couldn't be loaded/);
+  assert.match(source, /setPartial\(result\.partial\)/);
+});

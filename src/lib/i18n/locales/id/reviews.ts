@@ -18,6 +18,7 @@ export default {
   "No reviews in {language} here.": "Tidak ada ulasan dalam {language} di sini.",
   "{n} reviews couldn't be translated. Try again.": "{n} ulasan tidak dapat diterjemahkan. Coba lagi.",
   "Couldn't translate. Try again": "Gagal menerjemahkan. Coba lagi",
+  "Some recent reviews couldn't be loaded, so fallback reviews are shown after the newest results.": "Beberapa ulasan terbaru tidak dapat dimuat, jadi ulasan cadangan ditampilkan setelah hasil terbaru.",
   "Letterboxd didn't share review dates right now, so these are shown by popularity.": "Letterboxd sedang tidak memberikan tanggal ulasan, jadi ulasan diurutkan menurut popularitas.",
   "Reviewers' average: {rating}": "Rata-rata pengulas: {rating}",
 } as Record<string, string>;

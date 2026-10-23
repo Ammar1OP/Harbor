@@ -29,7 +29,7 @@ const lib = (
 ) =>
   load<typeof import("../src/lib/episode-reviews")>("src/lib/episode-reviews.ts", {
     "@/lib/safe-fetch": { safeFetch },
-    "@/lib/trakt/comments": { fetchComments },
+    "@/lib/trakt/comments": { fetchCommentsStrict: fetchComments },
   });
 
 /** An IMDb GraphQL stub; `pages` answers the season's episode list one page per request. */
@@ -190,9 +190,11 @@ test("episode reviews load a page at a time and say where the next page starts",
   const first = await fetchEpisodeReviews("tt0903747", 1, 1);
   assert.equal(first.reviews.length, 26);
   assert.deepEqual(first.next, { imdb: null, trakt: 2 });
+  assert.deepEqual(first.failed, []);
   const second = await fetchEpisodeReviews("tt0903747", 1, 1, first.next!);
   assert.equal(second.reviews.length, 3);
   assert.equal(second.next, null);
+  assert.deepEqual(second.failed, []);
   assert.deepEqual(traktPages, [1, 2]);
   assert.equal(
     stub.queries.filter((q) => q.includes("reviews(")).length,
@@ -201,11 +203,76 @@ test("episode reviews load a page at a time and say where the next page starts",
   );
 });
 
+test("episode review sorts are requested from IMDb and Trakt instead of only reordering likes", async () => {
+  const calls: string[] = [];
+  const safeFetch = async (_url: string, init?: RequestInit) => {
+    const { query } = JSON.parse(String(init?.body)) as { query: string };
+    calls.push(query);
+    if (query.includes("episodes{")) {
+      return new Response(JSON.stringify({
+        data: { title: { episodes: { episodes: {
+          pageInfo: { hasNextPage: false },
+          edges: [{ node: { id: "tt5000001", series: { displayableEpisodeNumber: { episodeNumber: { text: "1" } } } } }],
+        } } } },
+      }));
+    }
+    return new Response(JSON.stringify({ data: { title: { reviews: { pageInfo: { hasNextPage: false }, edges: [] } } } }));
+  };
+  const traktSorts: string[] = [];
+  const { fetchEpisodeReviews } = lib(safeFetch, async (_target, sort) => {
+    traktSorts.push(String(sort));
+    return [];
+  });
+
+  for (const [sort, imdb, order, trakt] of [
+    ["liked", "HELPFULNESS_SCORE", "DESC", "likes"],
+    ["recent", "SUBMISSION_DATE", "DESC", "newest"],
+    ["highest", "USER_RATING", "DESC", "highest"],
+    ["lowest", "USER_RATING", "ASC", "lowest"],
+  ] as const) {
+    calls.length = 0;
+    await fetchEpisodeReviews("tt0903747", 1, 1, undefined, "tt5000001", sort);
+    const reviewQuery = calls.find((q) => q.includes("reviews("))!;
+    assert.ok(reviewQuery.includes(`sort:{by:${imdb}, order:${order}}`), reviewQuery);
+    assert.equal(traktSorts.at(-1), trakt);
+  }
+  assert.deepEqual(traktSorts, ["likes", "newest", "highest", "lowest"]);
+});
+
+test("temporary review page failures keep the source cursor so Show more can retry", async () => {
+  let imdbFails = true;
+  let traktFails = true;
+  const safeFetch = async (_url: string, init?: RequestInit) => {
+    const { query } = JSON.parse(String(init?.body)) as { query: string };
+    if (!query.includes("reviews(")) return new Response("{}", { status: 500 });
+    if (imdbFails) return new Response("", { status: 503 });
+    return new Response(JSON.stringify({ data: { title: { reviews: {
+      pageInfo: { hasNextPage: false },
+      edges: [{ node: { id: "rw1", text: { originalText: { plainText: "Recovered" } } } }],
+    } } } }));
+  };
+  const { fetchEpisodeReviews } = lib(safeFetch, async () => {
+    if (traktFails) throw new Error("temporary Trakt failure");
+    return [];
+  });
+
+  const failed = await fetchEpisodeReviews("tt0903747", 1, 1, undefined, "tt5000001");
+  assert.deepEqual(failed.failed.sort(), ["imdb", "trakt"]);
+  assert.deepEqual(failed.next, { imdb: "", trakt: 1 });
+
+  imdbFails = false;
+  traktFails = false;
+  const retried = await fetchEpisodeReviews("tt0903747", 1, 1, failed.next!, "tt5000001");
+  assert.deepEqual(retried.failed, []);
+  assert.equal(retried.reviews[0]!.text, "Recovered");
+  assert.equal(retried.next, null);
+});
+
 test("'Translate all' covers the reviews on screen, minus spoilers still hidden", () => {
   const icon = () => null;
   const { bulkTranslationGroups, bulkTranslationTexts, REVIEWS_STEP } = load<{
-    bulkTranslationGroups: (reviews: unknown[]) => string[][];
-    bulkTranslationTexts: (reviews: unknown[]) => string[];
+    bulkTranslationGroups: (reviews: unknown[], revealed?: ReadonlySet<string>) => string[][];
+    bulkTranslationTexts: (reviews: unknown[], revealed?: ReadonlySet<string>) => string[];
     REVIEWS_STEP: number;
   }>("src/views/detail/episode-reviews-dialog.tsx", {
     react: React,
@@ -222,10 +289,101 @@ test("'Translate all' covers the reviews on screen, minus spoilers still hidden"
   const reviews = [
     { title: "Title", text: "Body", spoiler: false },
     { title: "", text: "Plain", spoiler: false },
-    { title: "Spoiler title", text: "Spoiler body", spoiler: true },
+    { id: "spoiler", title: "Spoiler title", text: "Spoiler body", spoiler: true },
   ];
   assert.deepEqual(bulkTranslationGroups(reviews), [["Title", "Body"], ["Plain"]]);
   assert.deepEqual(bulkTranslationTexts(reviews), ["Title", "Body", "Plain"]);
+  assert.deepEqual(
+    bulkTranslationGroups(reviews, new Set(["spoiler"])),
+    [["Title", "Body"], ["Plain"], ["Spoiler title", "Spoiler body"]],
+    "an explicitly revealed spoiler participates in bulk translation",
+  );
+});
+
+test("Longest drains review pagination before presenting the sorted result", async () => {
+  const { JSDOM } = await import("jsdom");
+  const { createRoot } = await import("react-dom/client");
+  const dom = new JSDOM("<div id='root'></div>", { url: "https://fixture.invalid" });
+  Object.assign(globalThis, {
+    window: dom.window,
+    document: dom.window.document,
+    HTMLElement: dom.window.HTMLElement,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  });
+
+  const calls: Array<{ sort: string; cursor: unknown }> = [];
+  const short = {
+    id: "imdb:short", source: "imdb", author: "a", avatar: null, rating: null,
+    date: null, likes: 1, title: "", text: "short", spoiler: false, url: null,
+  };
+  const long = {
+    id: "imdb:long", source: "imdb", author: "b", avatar: null, rating: null,
+    date: null, likes: 0, title: "", text: "this is the much longer review", spoiler: false, url: null,
+  };
+  const fetchEpisodeReviews = async (
+    _id: string,
+    _season: number,
+    _episode: number,
+    cursor: any,
+    _episodeImdbId: unknown,
+    sort: string,
+  ) => {
+    calls.push({ sort, cursor });
+    if (sort !== "longest") return { reviews: [], next: null, failed: [] };
+    if (!cursor) return { reviews: [short], next: { imdb: "c2", trakt: null }, failed: [] };
+    return { reviews: [long], next: null, failed: [] };
+  };
+  const icon = () => null;
+  const { EpisodeReviewsDialog } = load<{ EpisodeReviewsDialog: React.FC<any> }>(
+    "src/views/detail/episode-reviews-dialog.tsx",
+    {
+      react: React,
+      "react/jsx-runtime": jsxRuntime,
+      "lucide-react": new Proxy({}, { get: () => icon }),
+      "@/components/hover-tooltip": { HoverTooltip: ({ children }: any) => children },
+      "@/components/modal-shell": {
+        ModalShell: ({ children }: any) => React.createElement("div", null, children),
+        useModalExit: (onClose: () => void) => ({ closing: false, close: onClose }),
+      },
+      "@/lib/i18n": { useT: () => (text: string) => text },
+      "@/lib/window": { openUrl: () => {} },
+      "@/lib/episode-reviews": {
+        fetchEpisodeReviews,
+        reviewersAverage: () => null,
+        sortEpisodeReviews: (reviews: any[], sort: string) =>
+          sort === "longest" ? [...reviews].sort((a, b) => b.text.length - a.text.length) : reviews,
+      },
+      "./review-translation": {
+        useReviewTranslator: () => ({
+          display: (text: string) => text,
+          isShown: () => false,
+          isBusy: () => false,
+          isFailed: () => false,
+          toggle: () => {},
+          translateAll: () => {},
+          busyAll: false,
+          failedAll: 0,
+        }),
+        ReviewTranslateBar: () => null,
+        ReviewTranslateButton: () => null,
+      },
+    },
+  );
+  const root = createRoot(document.getElementById("root")!);
+  await React.act(async () => {
+    root.render(React.createElement(EpisodeReviewsDialog, {
+      seriesImdbId: "tt0903747", season: 1, episode: 1, onClose: () => {},
+    }));
+  });
+  await React.act(async () => {});
+  const longest = [...document.querySelectorAll("button")].find((b) => b.textContent === "Longest")!;
+  await React.act(async () => longest.click());
+  await React.act(async () => {});
+  const longestCalls = calls.filter((c) => c.sort === "longest");
+  assert.equal(longestCalls.length, 2, "the second page is fetched before Longest settles");
+  const text = document.body.textContent ?? "";
+  assert.ok(text.indexOf(long.text) < text.indexOf(short.text), text);
+  await React.act(async () => root.unmount());
 });
 
 function loadGridCard(onReviews: () => void = () => {}) {

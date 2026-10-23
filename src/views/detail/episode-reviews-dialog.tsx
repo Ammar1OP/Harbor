@@ -10,6 +10,7 @@ import {
   reviewersAverage,
   sortEpisodeReviews,
   type EpisodeReview,
+  type EpisodeReviewSource,
   type EpisodeReviewsCursor,
   type EpisodeReviewSort,
 } from "@/lib/episode-reviews";
@@ -33,12 +34,20 @@ const LONG_REVIEW = 700;
 export const REVIEWS_STEP = 25;
 
 /** The reviews "Translate all" covers: the ones on screen, minus spoilers still hidden. */
-export function bulkTranslationGroups(shown: EpisodeReview[]): string[][] {
-  return shown.filter((r) => !r.spoiler).map((r) => (r.title ? [r.title, r.text] : [r.text]));
+export function bulkTranslationGroups(
+  shown: EpisodeReview[],
+  revealedSpoilers: ReadonlySet<string> = new Set(),
+): string[][] {
+  return shown
+    .filter((r) => !r.spoiler || revealedSpoilers.has(r.id))
+    .map((r) => (r.title ? [r.title, r.text] : [r.text]));
 }
 
-export function bulkTranslationTexts(shown: EpisodeReview[]): string[] {
-  return bulkTranslationGroups(shown).flat();
+export function bulkTranslationTexts(
+  shown: EpisodeReview[],
+  revealedSpoilers: ReadonlySet<string> = new Set(),
+): string[] {
+  return bulkTranslationGroups(shown, revealedSpoilers).flat();
 }
 
 export function EpisodeReviewsDialog({
@@ -62,28 +71,76 @@ export function EpisodeReviewsDialog({
   const [loaded, setLoaded] = useState<EpisodeReview[] | null>(null);
   const [next, setNext] = useState<EpisodeReviewsCursor | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [failedSources, setFailedSources] = useState<EpisodeReviewSource[]>([]);
   const [visibleCount, setVisibleCount] = useState(REVIEWS_STEP);
   const [sort, setSort] = useState<EpisodeReviewSort>("liked");
+  const [revealedSpoilers, setRevealedSpoilers] = useState<Set<string>>(() => new Set());
   const tr = useReviewTranslator();
   const generation = useRef(0);
+
+  const fetchPages = async (cursor?: EpisodeReviewsCursor) => {
+    const reviews: EpisodeReview[] = [];
+    const seen = new Set<string>();
+    const addReviews = (pageReviews: EpisodeReview[]) => {
+      for (const review of pageReviews) {
+        if (!seen.has(review.id)) {
+          seen.add(review.id);
+          reviews.push(review);
+        }
+      }
+    };
+
+    let page = await fetchEpisodeReviews(
+      seriesImdbId,
+      season,
+      episode,
+      cursor,
+      undefined,
+      sort,
+    );
+    addReviews(page.reviews);
+    let next = page.next;
+    let failed = page.failed;
+
+    // Longest has no native order on IMDb or Trakt, so read both sources to completion before
+    // presenting that order. Every successful page must advance the cursor.
+    while (sort === "longest" && !failed.length && next) {
+      const current = next;
+      page = await fetchEpisodeReviews(
+        seriesImdbId,
+        season,
+        episode,
+        current,
+        undefined,
+        sort,
+      );
+      addReviews(page.reviews);
+      next = page.next;
+      failed = page.failed;
+      if (next && JSON.stringify(next) === JSON.stringify(current)) break;
+    }
+    return { reviews, next, failed };
+  };
 
   useEffect(() => {
     const id = ++generation.current;
     setLoaded(null);
     setNext(null);
+    setFailedSources([]);
     setLoadingMore(false);
     setVisibleCount(REVIEWS_STEP);
-    fetchEpisodeReviews(seriesImdbId, season, episode).then((page) => {
+    void fetchPages().then((page) => {
       if (id !== generation.current) return;
       setLoaded(page.reviews);
       setNext(page.next);
+      setFailedSources(page.failed);
     });
     return () => void ++generation.current;
-  }, [seriesImdbId, season, episode]);
+  }, [seriesImdbId, season, episode, sort]);
 
   const sorted = useMemo(() => (loaded ? sortEpisodeReviews(loaded, sort) : []), [loaded, sort]);
   const shown = sorted.slice(0, visibleCount);
-  const translationGroups = bulkTranslationGroups(shown);
+  const translationGroups = bulkTranslationGroups(shown, revealedSpoilers);
   const average = useMemo(() => reviewersAverage(loaded ?? []), [loaded]);
   const counts = useMemo(
     () => ({
@@ -102,14 +159,15 @@ export function EpisodeReviewsDialog({
     }
     const id = generation.current;
     setLoadingMore(true);
-    const page = await fetchEpisodeReviews(seriesImdbId, season, episode, next);
+    const page = await fetchPages(next);
     if (id !== generation.current) return;
     setLoaded((prev) => {
       const seen = new Set((prev ?? []).map((r) => r.id));
       return [...(prev ?? []), ...page.reviews.filter((r) => !seen.has(r.id))];
     });
     setNext(page.next);
-    setVisibleCount((n) => n + REVIEWS_STEP);
+    setFailedSources(page.failed);
+    if (page.reviews.length) setVisibleCount((n) => n + REVIEWS_STEP);
     setLoadingMore(false);
   };
   const more = sorted.length > visibleCount || next != null;
@@ -186,8 +244,25 @@ export function EpisodeReviewsDialog({
           </p>
         )}
         {shown.map((r) => (
-          <ReviewCard key={r.id} review={r} tr={tr} />
+          <ReviewCard
+            key={r.id}
+            review={r}
+            tr={tr}
+            revealed={!r.spoiler || revealedSpoilers.has(r.id)}
+            onReveal={() =>
+              setRevealedSpoilers((prev) => {
+                const next = new Set(prev);
+                next.add(r.id);
+                return next;
+              })
+            }
+          />
         ))}
+        {loaded && failedSources.length > 0 && (
+          <p role="status" className="text-center text-[12px] text-danger">
+            {t("Reviews couldn't be loaded right now.")}
+          </p>
+        )}
         {loaded && more && (
           <button
             type="button"
@@ -196,7 +271,7 @@ export function EpisodeReviewsDialog({
             className="flex h-10 shrink-0 items-center justify-center gap-2 rounded-xl bg-white/[0.06] text-[13px] font-semibold text-ink-muted transition-colors hover:bg-white/[0.10] hover:text-ink disabled:opacity-60"
           >
             {loadingMore && <Loader2 size={14} className="animate-spin" />}
-            {t("Show more")}
+            {t(failedSources.length > 0 ? "Try again" : "Show more")}
           </button>
         )}
       </div>
@@ -204,9 +279,20 @@ export function EpisodeReviewsDialog({
   );
 }
 
-export function ReviewCard({ review, tr }: { review: EpisodeReview; tr: ReviewTranslator }) {
+export function ReviewCard({
+  review,
+  tr,
+  revealed: controlledRevealed,
+  onReveal,
+}: {
+  review: EpisodeReview;
+  tr: ReviewTranslator;
+  revealed?: boolean;
+  onReveal?: () => void;
+}) {
   const t = useT();
-  const [revealed, setRevealed] = useState(!review.spoiler);
+  const [localRevealed, setLocalRevealed] = useState(!review.spoiler);
+  const revealed = controlledRevealed ?? localRevealed;
   const [expanded, setExpanded] = useState(false);
   const long = review.text.length > LONG_REVIEW;
 
@@ -286,7 +372,10 @@ export function ReviewCard({ review, tr }: { review: EpisodeReview; tr: ReviewTr
         {!revealed && (
           <button
             type="button"
-            onClick={() => setRevealed(true)}
+            onClick={() => {
+              setLocalRevealed(true);
+              onReveal?.();
+            }}
             className="absolute inset-0 grid place-items-center text-[12.5px] font-semibold text-ink"
           >
             {t("Contains spoilers. Click to reveal")}
